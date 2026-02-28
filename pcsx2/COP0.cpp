@@ -223,11 +223,24 @@ __fi void COP0_UpdatePCCR()
 //////////////////////////////////////////////////////////////////////////////////////////
 //
 
+static u32 ConvertPageMask(u32 PageMask);
 
 void MapTLB(const tlbs& t, int i)
 {
 	u32 mask, addr;
 	u32 saddr, eaddr;
+
+	if (!t.isSPR() && ((t.EntryLo0.V && t.EntryLo0.isCached()) || (t.EntryLo1.V && t.EntryLo1.isCached())))
+	{
+		const size_t idx = cachedTlbs.count;
+		pxAssert(idx < cachedTlbs.CacheEnabled0.size());
+		cachedTlbs.CacheEnabled0[idx] = t.EntryLo0.isCached() ? ~0 : 0;
+		cachedTlbs.CacheEnabled1[idx] = t.EntryLo1.isCached() ? ~0 : 0;
+		cachedTlbs.PFN1s[idx] = t.PFN1();
+		cachedTlbs.PFN0s[idx] = t.PFN0();
+		cachedTlbs.PageMasks[idx] = ConvertPageMask(t.PageMask.UL);
+		cachedTlbs.count++;
+	}
 
 	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
 		i, t.VPN2(), t.PFN0(), t.PFN1(), t.isSPR() >> 31, t.isGlobal(), t.EntryHi.ASID,
@@ -280,7 +293,40 @@ void MapTLB(const tlbs& t, int i)
 	}
 }
 
-__inline u32 ConvertPageMask(const u32 PageMask)
+static bool IsTLBEntryActiveForASID(const tlbs& entry, u8 asid)
+{
+	return entry.isGlobal() || (entry.EntryHi.ASID == asid);
+}
+
+static void RebuildTLBContext()
+{
+	const u8 asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+
+	for (int i = 0; i < 48; i++)
+		UnmapTLB(tlb[i], i);
+
+	for (int i = 0; i < 48; i++)
+	{
+		if (IsTLBEntryActiveForASID(tlb[i], asid))
+			MapTLB(tlb[i], i);
+	}
+}
+
+static u8 GetRandomTLBIndex()
+{
+	u32 wired = cpuRegs.CP0.n.Wired & 0x3F;
+	if (wired >= 48)
+		wired = 47;
+
+	u32 random = cpuRegs.CP0.n.Random & 0x3F;
+	if (random >= 48 || random < wired)
+		random = 47;
+
+	cpuRegs.CP0.n.Random = (random <= wired) ? 47 : (random - 1);
+	return static_cast<u8>(random);
+}
+
+static u32 ConvertPageMask(u32 PageMask)
 {
 	const u32 mask = std::popcount(PageMask >> 13);
 
@@ -353,6 +399,11 @@ void UnmapTLB(const tlbs& t, int i)
 
 void WriteTLB(int i)
 {
+	const u8 current_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+	const bool had_active_mapping = IsTLBEntryActiveForASID(tlb[i], current_asid);
+	if (had_active_mapping)
+		UnmapTLB(tlb[i], i);
+
 	tlb[i].PageMask.UL = cpuRegs.CP0.n.PageMask;
 	tlb[i].EntryHi.UL = cpuRegs.CP0.n.EntryHi;
 	tlb[i].EntryLo0.UL = cpuRegs.CP0.n.EntryLo0;
@@ -374,19 +425,8 @@ void WriteTLB(int i)
 			tlb[i].EntryLo1.C = 2;
 	}
 
-	if (!tlb[i].isSPR() && ((tlb[i].EntryLo0.V && tlb[i].EntryLo0.isCached()) || (tlb[i].EntryLo1.V && tlb[i].EntryLo1.isCached())))
-	{
-		const size_t idx = cachedTlbs.count;
-		cachedTlbs.CacheEnabled0[idx] = tlb[i].EntryLo0.isCached() ? ~0 : 0;
-		cachedTlbs.CacheEnabled1[idx] = tlb[i].EntryLo1.isCached() ? ~0 : 0;
-		cachedTlbs.PFN1s[idx] = tlb[i].PFN1();
-		cachedTlbs.PFN0s[idx] = tlb[i].PFN0();
-		cachedTlbs.PageMasks[idx] = ConvertPageMask(tlb[i].PageMask.UL);
-
-		cachedTlbs.count++;
-	}
-
-	MapTLB(tlb[i], i);
+	if (IsTLBEntryActiveForASID(tlb[i], current_asid))
+		MapTLB(tlb[i], i);
 }
 
 namespace R5900 {
@@ -432,13 +472,12 @@ namespace COP0 {
 			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
 
-		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
 	}
 
 	void TLBWR()
 	{
-		const u8 j = cpuRegs.CP0.n.Random & 0x3f;
+		const u8 j = GetRandomTLBIndex();
 
 		if (j > 47)
 		{
@@ -450,7 +489,6 @@ namespace COP0 {
 			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
 
-		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
 	}
 
@@ -543,6 +581,20 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
 		switch (_Rd_)
 		{
+			case 6:
+				cpuRegs.CP0.n.Wired = std::min(cpuRegs.GPR.r[_Rt_].UL[0] & 0x3F, 47u);
+				cpuRegs.CP0.n.Random = 47;
+				break;
+
+			case 10:
+			{
+				const u8 old_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+				cpuRegs.CP0.n.EntryHi = cpuRegs.GPR.r[_Rt_].UL[0];
+				if (static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF) != old_asid)
+					RebuildTLBContext();
+				break;
+			}
+
 			case 9:
 				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
 				cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
