@@ -4,6 +4,15 @@
 #include "Common.h"
 #include "COP0.h"
 
+static constexpr bool TLB_TRACE_LOG = true;
+
+#define TLBTrace(...) \
+	do \
+	{ \
+		if (TLB_TRACE_LOG) \
+			DevCon.WriteLn(__VA_ARGS__); \
+	} while (0)
+
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
 // Given this function is called so much, it's commented out for now. (rama)
@@ -223,11 +232,33 @@ __fi void COP0_UpdatePCCR()
 //////////////////////////////////////////////////////////////////////////////////////////
 //
 
+static u32 ConvertPageMask(u32 PageMask);
+static bool IsDirectMappedKernelSegment(u32 vaddr);
 
 void MapTLB(const tlbs& t, int i)
 {
 	u32 mask, addr;
 	u32 saddr, eaddr;
+	TLBTrace("[TLB] MapTLB idx=%d VPN2=%08x mask=%03x ASID=%02x G=%d V0=%d V1=%d D0=%d D1=%d SPR=%d",
+		i, t.VPN2(), t.Mask(), t.EntryHi.ASID, t.isGlobal() ? 1 : 0, t.EntryLo0.V, t.EntryLo1.V, t.EntryLo0.D, t.EntryLo1.D, t.isSPR() ? 1 : 0);
+
+	// TLB translation only applies to mapped segments (kuseg/suseg). kseg0/kseg1 are
+	// unmapped and direct-translated, so we must not let TLB entries disturb those
+	// virtual ranges in the emulator's vmap.
+	if (!t.isSPR() && IsDirectMappedKernelSegment(t.VPN2()))
+		return;
+
+	if (!t.isSPR() && ((t.EntryLo0.V && t.EntryLo0.isCached()) || (t.EntryLo1.V && t.EntryLo1.isCached())))
+	{
+		const size_t idx = cachedTlbs.count;
+		pxAssert(idx < cachedTlbs.CacheEnabled0.size());
+		cachedTlbs.CacheEnabled0[idx] = t.EntryLo0.isCached() ? ~0 : 0;
+		cachedTlbs.CacheEnabled1[idx] = t.EntryLo1.isCached() ? ~0 : 0;
+		cachedTlbs.PFN1s[idx] = t.PFN1();
+		cachedTlbs.PFN0s[idx] = t.PFN0();
+		cachedTlbs.PageMasks[idx] = ConvertPageMask(t.PageMask.UL);
+		cachedTlbs.count++;
+	}
 
 	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
 		i, t.VPN2(), t.PFN0(), t.PFN1(), t.isSPR() >> 31, t.isGlobal(), t.EntryHi.ASID,
@@ -280,7 +311,51 @@ void MapTLB(const tlbs& t, int i)
 	}
 }
 
-__inline u32 ConvertPageMask(const u32 PageMask)
+static bool IsTLBEntryActiveForASID(const tlbs& entry, u8 asid)
+{
+	return entry.isGlobal() || (entry.EntryHi.ASID == asid);
+}
+
+static bool IsDirectMappedKernelSegment(u32 vaddr)
+{
+	// EE kseg0/kseg1 are direct-mapped (not translated by TLB).
+	// kseg2/kseg3 (0xC0000000+) are still TLB-translated.
+	return (vaddr >= 0x80000000 && vaddr < 0xC0000000);
+}
+
+static void RebuildTLBContext()
+{
+	const u8 asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+	TLBTrace("[TLB] RebuildTLBContext ASID=%02x", asid);
+
+	for (int i = 0; i < 48; i++)
+		UnmapTLB(tlb[i], i);
+
+	for (int i = 0; i < 48; i++)
+	{
+		if (IsTLBEntryActiveForASID(tlb[i], asid))
+		{
+			TLBTrace("[TLB]  active entry idx=%d VPN2=%08x mask=%03x G=%d asid=%02x", i, tlb[i].VPN2(), tlb[i].Mask(), tlb[i].isGlobal(), tlb[i].EntryHi.ASID);
+			MapTLB(tlb[i], i);
+		}
+	}
+}
+
+static u8 GetRandomTLBIndex()
+{
+	u32 wired = cpuRegs.CP0.n.Wired & 0x3F;
+	if (wired >= 48)
+		wired = 47;
+
+	u32 random = cpuRegs.CP0.n.Random & 0x3F;
+	if (random >= 48 || random < wired)
+		random = 47;
+
+	cpuRegs.CP0.n.Random = (random <= wired) ? 47 : (random - 1);
+	return static_cast<u8>(random);
+}
+
+static u32 ConvertPageMask(u32 PageMask)
 {
 	const u32 mask = std::popcount(PageMask >> 13);
 
@@ -294,6 +369,10 @@ void UnmapTLB(const tlbs& t, int i)
 	//Console.WriteLn("Clear TLB %d: %08x-> [%08x %08x] S=%d G=%d ASID=%d Mask= %03X", i,t.VPN2,t.PFN0,t.PFN1,t.S,t.G,t.ASID,t.Mask);
 	u32 mask, addr;
 	u32 saddr, eaddr;
+	TLBTrace("[TLB] UnmapTLB idx=%d VPN2=%08x mask=%03x ASID=%02x G=%d SPR=%d", i, t.VPN2(), t.Mask(), t.EntryHi.ASID, t.isGlobal() ? 1 : 0, t.isSPR() ? 1 : 0);
+
+	if (!t.isSPR() && IsDirectMappedKernelSegment(t.VPN2()))
+		return;
 
 	if (t.isSPR())
 	{
@@ -353,10 +432,18 @@ void UnmapTLB(const tlbs& t, int i)
 
 void WriteTLB(int i)
 {
+	const u8 current_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+	const bool had_active_mapping = IsTLBEntryActiveForASID(tlb[i], current_asid);
+	if (had_active_mapping)
+		UnmapTLB(tlb[i], i);
+
 	tlb[i].PageMask.UL = cpuRegs.CP0.n.PageMask;
 	tlb[i].EntryHi.UL = cpuRegs.CP0.n.EntryHi;
 	tlb[i].EntryLo0.UL = cpuRegs.CP0.n.EntryLo0;
 	tlb[i].EntryLo1.UL = cpuRegs.CP0.n.EntryLo1;
+
+	TLBTrace("[TLB] WriteTLB idx=%d old_active=%d pm=%08x hi=%08x lo0=%08x lo1=%08x", i, had_active_mapping ? 1 : 0,
+		tlb[i].PageMask.UL, tlb[i].EntryHi.UL, tlb[i].EntryLo0.UL, tlb[i].EntryLo1.UL);
 
 	// Setting the cache mode to reserved values is vaguely defined in the manual.
 	// I found that SPR is set to cached regardless.
@@ -374,19 +461,11 @@ void WriteTLB(int i)
 			tlb[i].EntryLo1.C = 2;
 	}
 
-	if (!tlb[i].isSPR() && ((tlb[i].EntryLo0.V && tlb[i].EntryLo0.isCached()) || (tlb[i].EntryLo1.V && tlb[i].EntryLo1.isCached())))
+	if (IsTLBEntryActiveForASID(tlb[i], current_asid))
 	{
-		const size_t idx = cachedTlbs.count;
-		cachedTlbs.CacheEnabled0[idx] = tlb[i].EntryLo0.isCached() ? ~0 : 0;
-		cachedTlbs.CacheEnabled1[idx] = tlb[i].EntryLo1.isCached() ? ~0 : 0;
-		cachedTlbs.PFN1s[idx] = tlb[i].PFN1();
-		cachedTlbs.PFN0s[idx] = tlb[i].PFN0();
-		cachedTlbs.PageMasks[idx] = ConvertPageMask(tlb[i].PageMask.UL);
-
-		cachedTlbs.count++;
+		TLBTrace("[TLB]  map idx=%d for current ASID=%02x", i, current_asid);
+		MapTLB(tlb[i], i);
 	}
-
-	MapTLB(tlb[i], i);
 }
 
 namespace R5900 {
@@ -432,13 +511,12 @@ namespace COP0 {
 			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
 
-		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
 	}
 
 	void TLBWR()
 	{
-		const u8 j = cpuRegs.CP0.n.Random & 0x3f;
+		const u8 j = GetRandomTLBIndex();
 
 		if (j > 47)
 		{
@@ -449,33 +527,22 @@ namespace COP0 {
 		DevCon.Warning("COP0_TLBWR %d:%x,%x,%x,%x\n",
 			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		TLBTrace("[TLB] TLBWR chose idx=%d wired=%u random_next=%u", j, cpuRegs.CP0.n.Wired & 0x3f, cpuRegs.CP0.n.Random & 0x3f);
 
-		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
 	}
 
 	void TLBP()
 	{
-		int i;
-
-		union
-		{
-			struct
-			{
-				u32 VPN2 : 19;
-				u32 VPN2X : 2;
-				u32 G : 3;
-				u32 ASID : 8;
-			} s;
-			u32 u;
-		} EntryHi32;
-
-		EntryHi32.u = cpuRegs.CP0.n.EntryHi;
+		const u32 probe_vpn2 = (cpuRegs.CP0.n.EntryHi >> 13) & 0x7FFFF;
+		const u8 probe_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
 
 		cpuRegs.CP0.n.Index = 0xFFFFFFFF;
-		for (i = 0; i < 48; i++)
+		for (int i = 0; i < 48; i++)
 		{
-			if (tlb[i].VPN2() == ((~tlb[i].Mask()) & (EntryHi32.s.VPN2)) && ((tlb[i].isGlobal()) || ((tlb[i].EntryHi.ASID & 0xff) == EntryHi32.s.ASID)))
+			const u32 entry_vpn2 = (tlb[i].EntryHi.VPN2 & ~tlb[i].Mask());
+			const u32 masked_probe_vpn2 = (probe_vpn2 & ~tlb[i].Mask());
+			if (entry_vpn2 == masked_probe_vpn2 && (tlb[i].isGlobal() || (tlb[i].EntryHi.ASID == probe_asid)))
 			{
 				cpuRegs.CP0.n.Index = i;
 				break;
@@ -483,6 +550,8 @@ namespace COP0 {
 		}
 		if (cpuRegs.CP0.n.Index == 0xFFFFFFFF)
 			cpuRegs.CP0.n.Index = 0x80000000;
+
+		TLBTrace("[TLB] TLBP entryhi=%08x -> index=%08x", cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.Index);
 	}
 
 	void MFC0()
@@ -543,6 +612,20 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
 		switch (_Rd_)
 		{
+			case 6:
+				cpuRegs.CP0.n.Wired = std::min(cpuRegs.GPR.r[_Rt_].UL[0] & 0x3F, 47u);
+				cpuRegs.CP0.n.Random = 47;
+				break;
+
+			case 10:
+			{
+				const u8 old_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+				cpuRegs.CP0.n.EntryHi = cpuRegs.GPR.r[_Rt_].UL[0];
+				if (static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF) != old_asid)
+					RebuildTLBContext();
+				break;
+			}
+
 			case 9:
 				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
 				cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
