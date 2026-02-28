@@ -341,6 +341,9 @@ void UnmapTLB(const tlbs& t, int i)
 	u32 mask, addr;
 	u32 saddr, eaddr;
 
+	if (!t.isSPR() && t.VPN2() >= 0x80000000)
+		return;
+
 	if (t.isSPR())
 	{
 		vtlb_VMapUnmap(t.VPN2(), 0x4000);
