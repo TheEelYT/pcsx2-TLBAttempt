@@ -39,6 +39,14 @@
 #define FASTMEM_LOG(...)
 //#define FASTMEM_LOG(...) Console.WriteLn(__VA_ARGS__)
 
+static constexpr bool TLB_TRACE_LOG = true;
+#define TLBTrace(...) \
+	do \
+	{ \
+		if (TLB_TRACE_LOG) \
+			DevCon.WriteLn(__VA_ARGS__); \
+	} while (0)
+
 using namespace R5900;
 using namespace vtlb_private;
 
@@ -512,6 +520,9 @@ void GoemonUnloadTlb(u32 key)
 // Generates a tlbMiss Exception
 static __ri void vtlb_Miss(u32 addr, u32 mode)
 {
+	TLBTrace("[TLB] Miss pc=%08x addr=%08x mode=%s asid=%02x entryhi=%08x status=%08x", cpuRegs.pc, addr,
+		mode ? "store" : "load", cpuRegs.CP0.n.EntryHi & 0xff, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.Status.val);
+
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		GoemonTlbMissDebug();
 
@@ -548,6 +559,9 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 // time of the exception.
 static __ri void vtlb_BusError(u32 addr, u32 mode)
 {
+	TLBTrace("[TLB] BusError pc=%08x addr=%08x mode=%s asid=%02x entryhi=%08x status=%08x", cpuRegs.pc, addr,
+		mode ? "store" : "load", cpuRegs.CP0.n.EntryHi & 0xff, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.Status.val);
+
 	const std::string message(fmt::format("Bus Error, addr=0x{:x} [{}]", addr, mode ? "store" : "load"));
 	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
