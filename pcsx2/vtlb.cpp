@@ -51,7 +51,6 @@ namespace vtlb_private
 
 static vtlbHandler vtlbHandlerCount = 0;
 
-static vtlbHandler DefaultPhyHandler;
 static vtlbHandler UnmappedVirtHandler;
 static vtlbHandler UnmappedPhyHandler;
 
@@ -1250,12 +1249,11 @@ void vtlb_Init()
 
 	UnmappedVirtHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedV));
 	UnmappedPhyHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedP));
-	DefaultPhyHandler = vtlb_RegisterHandler(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-
 	//done !
 
 	//Setup the initial mappings
-	vtlb_MapHandler(DefaultPhyHandler, 0, VTLB_PMAP_SZ);
+	// Unmapped physical pages should trigger bus errors, not host-side asserts.
+	vtlb_MapHandler(UnmappedPhyHandler, 0, VTLB_PMAP_SZ);
 
 	//Set the V space as unmapped
 	vtlb_VMapUnmap(0, (VTLB_VMAP_ITEMS - 1) * VTLB_PAGE_SIZE);
