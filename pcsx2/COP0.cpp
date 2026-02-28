@@ -260,18 +260,6 @@ void MapTLB(const tlbs& t, int i)
 		cachedTlbs.count++;
 	}
 
-	if (!t.isSPR() && ((t.EntryLo0.V && t.EntryLo0.isCached()) || (t.EntryLo1.V && t.EntryLo1.isCached())))
-	{
-		const size_t idx = cachedTlbs.count;
-		pxAssert(idx < cachedTlbs.CacheEnabled0.size());
-		cachedTlbs.CacheEnabled0[idx] = t.EntryLo0.isCached() ? ~0 : 0;
-		cachedTlbs.CacheEnabled1[idx] = t.EntryLo1.isCached() ? ~0 : 0;
-		cachedTlbs.PFN1s[idx] = t.PFN1();
-		cachedTlbs.PFN0s[idx] = t.PFN0();
-		cachedTlbs.PageMasks[idx] = ConvertPageMask(t.PageMask.UL);
-		cachedTlbs.count++;
-	}
-
 	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
 		i, t.VPN2(), t.PFN0(), t.PFN1(), t.isSPR() >> 31, t.isGlobal(), t.EntryHi.ASID,
 		t.Mask(), t.EntryLo0.PFN, t.EntryLo0.C, t.EntryLo1.PFN, t.EntryLo1.C, t.VPN2());
@@ -384,9 +372,6 @@ void UnmapTLB(const tlbs& t, int i)
 	TLBTrace("[TLB] UnmapTLB idx=%d VPN2=%08x mask=%03x ASID=%02x G=%d SPR=%d", i, t.VPN2(), t.Mask(), t.EntryHi.ASID, t.isGlobal() ? 1 : 0, t.isSPR() ? 1 : 0);
 
 	if (!t.isSPR() && IsDirectMappedKernelSegment(t.VPN2()))
-		return;
-
-	if (!t.isSPR() && t.VPN2() >= 0x80000000)
 		return;
 
 	if (t.isSPR())
@@ -549,26 +534,15 @@ namespace COP0 {
 
 	void TLBP()
 	{
-		int i;
-
-		union
-		{
-			struct
-			{
-				u32 VPN2 : 19;
-				u32 VPN2X : 2;
-				u32 G : 3;
-				u32 ASID : 8;
-			} s;
-			u32 u;
-		} EntryHi32;
-
-		EntryHi32.u = cpuRegs.CP0.n.EntryHi;
+		const u32 probe_vpn2 = (cpuRegs.CP0.n.EntryHi >> 13) & 0x7FFFF;
+		const u8 probe_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
 
 		cpuRegs.CP0.n.Index = 0xFFFFFFFF;
-		for (i = 0; i < 48; i++)
+		for (int i = 0; i < 48; i++)
 		{
-			if (tlb[i].VPN2() == ((~tlb[i].Mask()) & (EntryHi32.s.VPN2)) && ((tlb[i].isGlobal()) || ((tlb[i].EntryHi.ASID & 0xff) == EntryHi32.s.ASID)))
+			const u32 entry_vpn2 = (tlb[i].EntryHi.VPN2 & ~tlb[i].Mask());
+			const u32 masked_probe_vpn2 = (probe_vpn2 & ~tlb[i].Mask());
+			if (entry_vpn2 == masked_probe_vpn2 && (tlb[i].isGlobal() || (tlb[i].EntryHi.ASID == probe_asid)))
 			{
 				cpuRegs.CP0.n.Index = i;
 				break;
