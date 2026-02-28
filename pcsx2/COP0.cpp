@@ -399,6 +399,11 @@ void UnmapTLB(const tlbs& t, int i)
 
 void WriteTLB(int i)
 {
+	const u8 current_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+	const bool had_active_mapping = IsTLBEntryActiveForASID(tlb[i], current_asid);
+	if (had_active_mapping)
+		UnmapTLB(tlb[i], i);
+
 	tlb[i].PageMask.UL = cpuRegs.CP0.n.PageMask;
 	tlb[i].EntryHi.UL = cpuRegs.CP0.n.EntryHi;
 	tlb[i].EntryLo0.UL = cpuRegs.CP0.n.EntryLo0;
@@ -420,7 +425,8 @@ void WriteTLB(int i)
 			tlb[i].EntryLo1.C = 2;
 	}
 
-	RebuildTLBContext();
+	if (IsTLBEntryActiveForASID(tlb[i], current_asid))
+		MapTLB(tlb[i], i);
 }
 
 namespace R5900 {
