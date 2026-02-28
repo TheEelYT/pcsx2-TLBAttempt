@@ -224,18 +224,11 @@ __fi void COP0_UpdatePCCR()
 //
 
 static u32 ConvertPageMask(u32 PageMask);
-static bool IsDirectMappedKernelSegment(u32 vaddr);
 
 void MapTLB(const tlbs& t, int i)
 {
 	u32 mask, addr;
 	u32 saddr, eaddr;
-
-	// TLB translation only applies to mapped segments (kuseg/suseg). kseg0/kseg1 are
-	// unmapped and direct-translated, so we must not let TLB entries disturb those
-	// virtual ranges in the emulator's vmap.
-	if (!t.isSPR() && IsDirectMappedKernelSegment(t.VPN2()))
-		return;
 
 	if (!t.isSPR() && ((t.EntryLo0.V && t.EntryLo0.isCached()) || (t.EntryLo1.V && t.EntryLo1.isCached())))
 	{
@@ -305,13 +298,6 @@ static bool IsTLBEntryActiveForASID(const tlbs& entry, u8 asid)
 	return entry.isGlobal() || (entry.EntryHi.ASID == asid);
 }
 
-static bool IsDirectMappedKernelSegment(u32 vaddr)
-{
-	// EE kseg0/kseg1 are direct-mapped (not translated by TLB).
-	// kseg2/kseg3 (0xC0000000+) are still TLB-translated.
-	return (vaddr >= 0x80000000 && vaddr < 0xC0000000);
-}
-
 static void RebuildTLBContext()
 {
 	const u8 asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
@@ -355,7 +341,7 @@ void UnmapTLB(const tlbs& t, int i)
 	u32 mask, addr;
 	u32 saddr, eaddr;
 
-	if (!t.isSPR() && IsDirectMappedKernelSegment(t.VPN2()))
+	if (!t.isSPR() && t.VPN2() >= 0x80000000)
 		return;
 
 	if (t.isSPR())
