@@ -230,12 +230,6 @@ void MapTLB(const tlbs& t, int i)
 	u32 mask, addr;
 	u32 saddr, eaddr;
 
-	// TLB translation only applies to mapped segments (kuseg/suseg). kseg0/kseg1 are
-	// unmapped and direct-translated, so we must not let TLB entries disturb those
-	// virtual ranges in the emulator's vmap.
-	if (!t.isSPR() && t.VPN2() >= 0x80000000)
-		return;
-
 	if (!t.isSPR() && ((t.EntryLo0.V && t.EntryLo0.isCached()) || (t.EntryLo1.V && t.EntryLo1.isCached())))
 	{
 		const size_t idx = cachedTlbs.count;
