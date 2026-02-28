@@ -260,6 +260,18 @@ void MapTLB(const tlbs& t, int i)
 		cachedTlbs.count++;
 	}
 
+	if (!t.isSPR() && ((t.EntryLo0.V && t.EntryLo0.isCached()) || (t.EntryLo1.V && t.EntryLo1.isCached())))
+	{
+		const size_t idx = cachedTlbs.count;
+		pxAssert(idx < cachedTlbs.CacheEnabled0.size());
+		cachedTlbs.CacheEnabled0[idx] = t.EntryLo0.isCached() ? ~0 : 0;
+		cachedTlbs.CacheEnabled1[idx] = t.EntryLo1.isCached() ? ~0 : 0;
+		cachedTlbs.PFN1s[idx] = t.PFN1();
+		cachedTlbs.PFN0s[idx] = t.PFN0();
+		cachedTlbs.PageMasks[idx] = ConvertPageMask(t.PageMask.UL);
+		cachedTlbs.count++;
+	}
+
 	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
 		i, t.VPN2(), t.PFN0(), t.PFN1(), t.isSPR() >> 31, t.isGlobal(), t.EntryHi.ASID,
 		t.Mask(), t.EntryLo0.PFN, t.EntryLo0.C, t.EntryLo1.PFN, t.EntryLo1.C, t.VPN2());
@@ -372,6 +384,9 @@ void UnmapTLB(const tlbs& t, int i)
 	TLBTrace("[TLB] UnmapTLB idx=%d VPN2=%08x mask=%03x ASID=%02x G=%d SPR=%d", i, t.VPN2(), t.Mask(), t.EntryHi.ASID, t.isGlobal() ? 1 : 0, t.isSPR() ? 1 : 0);
 
 	if (!t.isSPR() && IsDirectMappedKernelSegment(t.VPN2()))
+		return;
+
+	if (!t.isSPR() && t.VPN2() >= 0x80000000)
 		return;
 
 	if (t.isSPR())
