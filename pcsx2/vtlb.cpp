@@ -44,7 +44,7 @@ static constexpr bool TLB_TRACE_LOG = true;
 	do \
 	{ \
 		if (TLB_TRACE_LOG) \
-			DevCon.WriteLn(__VA_ARGS__); \
+			Console.WriteLn(__VA_ARGS__); \
 	} while (0)
 
 using namespace R5900;

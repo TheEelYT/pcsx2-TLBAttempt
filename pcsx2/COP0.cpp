@@ -10,7 +10,7 @@ static constexpr bool TLB_TRACE_LOG = true;
 	do \
 	{ \
 		if (TLB_TRACE_LOG) \
-			DevCon.WriteLn(__VA_ARGS__); \
+			Console.WriteLn(__VA_ARGS__); \
 	} while (0)
 
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
@@ -347,11 +347,13 @@ static u8 GetRandomTLBIndex()
 	if (wired >= 48)
 		wired = 47;
 
-	u32 random = cpuRegs.CP0.n.Random & 0x3F;
+	const u32 original_random = cpuRegs.CP0.n.Random & 0x3F;
+	u32 random = original_random;
 	if (random >= 48 || random < wired)
 		random = 47;
 
 	cpuRegs.CP0.n.Random = (random <= wired) ? 47 : (random - 1);
+	TLBTrace("[TLB] GetRandomTLBIndex wired=%u random_in=%u chosen=%u random_out=%u", wired, original_random, random, cpuRegs.CP0.n.Random & 0x3F);
 	return static_cast<u8>(random);
 }
 
@@ -527,7 +529,8 @@ namespace COP0 {
 		DevCon.Warning("COP0_TLBWR %d:%x,%x,%x,%x\n",
 			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
-		TLBTrace("[TLB] TLBWR chose idx=%d wired=%u random_next=%u", j, cpuRegs.CP0.n.Wired & 0x3f, cpuRegs.CP0.n.Random & 0x3f);
+		TLBTrace("[TLB] TLBWR chose idx=%d wired=%u random_after=%u input_random=%u", j,
+			cpuRegs.CP0.n.Wired & 0x3f, cpuRegs.CP0.n.Random & 0x3f, (cpuRegs.CP0.r[1] & 0x3f));
 
 		WriteTLB(j);
 	}
