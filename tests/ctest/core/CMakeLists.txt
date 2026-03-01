@@ -1,5 +1,6 @@
 add_pcsx2_test(core_test
 	StubHost.cpp
+	tlb_miss_tests.cpp
 )
 
 set(multi_isa_sources
