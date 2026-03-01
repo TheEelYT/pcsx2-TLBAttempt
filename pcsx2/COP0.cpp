@@ -4,6 +4,10 @@
 #include "Common.h"
 #include "COP0.h"
 
+#ifdef PCSX2_DEVBUILD
+#include <unordered_set>
+#endif
+
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
 // Given this function is called so much, it's commented out for now. (rama)
@@ -77,6 +81,28 @@ static __fi bool COP0_TLBEntryMatchesVaddr(const tlbs& entry, u32 vaddr)
 	const u32 entry_hi = (vaddr & 0xffffe000) | entry.EntryHi.ASID;
 	return COP0_TLBEntryMatches(entry, entry_hi, false);
 }
+
+static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
+{
+	return (vaddr & 0x80000000) == 0;
+}
+
+#ifdef PCSX2_DEVBUILD
+static void COP0_LogSkippedTLBPageOpOnce(int index, u32 vaddr, bool map, bool odd_page)
+{
+	static std::unordered_set<u64> s_logged_signatures;
+	const u64 signature = (static_cast<u64>(map) << 63) |
+		(static_cast<u64>(odd_page) << 62) |
+		(static_cast<u64>(index & 0xff) << 32) |
+		static_cast<u64>(vaddr);
+
+	if (!s_logged_signatures.insert(signature).second)
+		return;
+
+	DevCon.Warning("COP0: Skipping %s TLB page op for non-TLB-managed vaddr 0x%08X (index=%d, page=%u)",
+		map ? "map" : "unmap", vaddr, index, odd_page ? 1 : 0);
+}
+#endif
 
 void COP0_SetWired(u32 value)
 {
@@ -328,10 +354,19 @@ void MapTLB(const tlbs& t, int i)
 
 			for (addr = saddr; addr < eaddr; addr++)
 			{
-				if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
+				const u32 vaddr = addr << 12;
+				if (!COP0_IsTLBManagedVaddr(vaddr))
+				{
+#ifdef PCSX2_DEVBUILD
+					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, false);
+#endif
+					continue;
+				}
+
+				if (COP0_TLBEntryMatchesVaddr(t, vaddr))
 				{ //match
-					memSetPageAddr(addr << 12, t.PFN0() + ((addr - saddr) << 12));
-					Cpu->Clear(addr << 12, 0x400);
+					memSetPageAddr(vaddr, t.PFN0() + ((addr - saddr) << 12));
+					Cpu->Clear(vaddr, 0x400);
 				}
 			}
 		}
@@ -343,10 +378,19 @@ void MapTLB(const tlbs& t, int i)
 
 			for (addr = saddr; addr < eaddr; addr++)
 			{
-				if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
+				const u32 vaddr = addr << 12;
+				if (!COP0_IsTLBManagedVaddr(vaddr))
+				{
+#ifdef PCSX2_DEVBUILD
+					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, true);
+#endif
+					continue;
+				}
+
+				if (COP0_TLBEntryMatchesVaddr(t, vaddr))
 				{ //match
-					memSetPageAddr(addr << 12, t.PFN1() + ((addr - saddr) << 12));
-					Cpu->Clear(addr << 12, 0x400);
+					memSetPageAddr(vaddr, t.PFN1() + ((addr - saddr) << 12));
+					Cpu->Clear(vaddr, 0x400);
 				}
 			}
 		}
@@ -381,10 +425,19 @@ void UnmapTLB(const tlbs& t, int i)
 		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
 		for (addr = saddr; addr < eaddr; addr++)
 		{
-			if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
+			const u32 vaddr = addr << 12;
+			if (!COP0_IsTLBManagedVaddr(vaddr))
+			{
+#ifdef PCSX2_DEVBUILD
+				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, false);
+#endif
+				continue;
+			}
+
+			if (COP0_TLBEntryMatchesVaddr(t, vaddr))
 			{ //match
-				memClearPageAddr(addr << 12);
-				Cpu->Clear(addr << 12, 0x400);
+				memClearPageAddr(vaddr);
+				Cpu->Clear(vaddr, 0x400);
 			}
 		}
 	}
@@ -396,10 +449,19 @@ void UnmapTLB(const tlbs& t, int i)
 		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
 		for (addr = saddr; addr < eaddr; addr++)
 		{
-			if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
+			const u32 vaddr = addr << 12;
+			if (!COP0_IsTLBManagedVaddr(vaddr))
+			{
+#ifdef PCSX2_DEVBUILD
+				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, true);
+#endif
+				continue;
+			}
+
+			if (COP0_TLBEntryMatchesVaddr(t, vaddr))
 			{ //match
-				memClearPageAddr(addr << 12);
-				Cpu->Clear(addr << 12, 0x400);
+				memClearPageAddr(vaddr);
+				Cpu->Clear(vaddr, 0x400);
 			}
 		}
 	}
