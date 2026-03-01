@@ -384,7 +384,7 @@ void MapTLB(const tlbs& t, int i)
 					continue;
 				}
 
-				if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+				if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
 				{ //match
 					memSetPageAddr(vaddr, t.PFN0() + ((addr - saddr) << 12));
 					Cpu->Clear(vaddr, 0x400);
@@ -405,7 +405,7 @@ void MapTLB(const tlbs& t, int i)
 					continue;
 				}
 
-				if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+				if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
 				{ //match
 					memSetPageAddr(vaddr, t.PFN1() + ((addr - saddr) << 12));
 					Cpu->Clear(vaddr, 0x400);
@@ -458,7 +458,7 @@ void UnmapTLB(const tlbs& t, int i)
 				continue;
 			}
 
-			if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+			if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
 			{ //match
 				memClearPageAddr(vaddr);
 				Cpu->Clear(vaddr, 0x400);
@@ -480,7 +480,7 @@ void UnmapTLB(const tlbs& t, int i)
 				continue;
 			}
 
-			if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+			if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
 			{ //match
 				memClearPageAddr(vaddr);
 				Cpu->Clear(vaddr, 0x400);
