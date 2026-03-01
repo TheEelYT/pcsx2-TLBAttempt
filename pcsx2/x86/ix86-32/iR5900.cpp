@@ -2179,7 +2179,9 @@ static void recRecompile(const u32 startpc)
 	u32 i = 0;
 	u32 willbranch3 = 0;
 
-	pxAssert(startpc);
+	// startpc can legitimately be 0 when executing from 0x80000000, because HWADDR()
+	// maps that virtual address to physical address 0 (TLB refill vector when BEV=0).
+	// Rejecting 0 here causes false assertion failures during valid exception flow.
 
 	// if recPtr reached the mem limit reset whole mem
 	if (recPtr >= recPtrEnd)
