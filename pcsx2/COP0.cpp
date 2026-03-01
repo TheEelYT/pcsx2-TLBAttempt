@@ -65,22 +65,47 @@ static __fi u32 COP0_GetTLBCompareMask(const tlbs& entry)
 	return (~entry.Mask()) & 0x7ffff;
 }
 
-static __fi bool COP0_TLBEntryMatches(const tlbs& entry, u32 entry_hi, bool check_asid = true)
+struct COP0TLBMatchResult
 {
-	if ((entry.EntryHi.VPN2 & COP0_GetTLBCompareMask(entry)) != (COP0_GetEntryHiVPN2(entry_hi) & COP0_GetTLBCompareMask(entry)))
-		return false;
+	bool matched;
+	bool odd_page;
+};
 
-	if (!check_asid || entry.isGlobal())
-		return true;
+static __fi COP0TLBMatchResult COP0_TLBMatchTuple(const tlbs& entry, u32 entry_hi, u32 vaddr, bool check_asid)
+{
+	const u32 compare_mask = COP0_GetTLBCompareMask(entry);
+	const bool vpn2_match = (entry.EntryHi.VPN2 & compare_mask) == (COP0_GetEntryHiVPN2(entry_hi) & compare_mask);
+	const bool asid_match = !check_asid || entry.isGlobal() || (entry.EntryHi.ASID == static_cast<u8>(entry_hi));
 
-	return entry.EntryHi.ASID == static_cast<u8>(entry_hi);
+	const u32 page_span = entry.Mask() + 1;
+	const bool odd_page = (((vaddr >> 12) & page_span) != 0);
+	return {vpn2_match && asid_match, odd_page};
 }
 
-static __fi bool COP0_TLBEntryMatchesVaddr(const tlbs& entry, u32 vaddr)
+static __fi COP0TLBMatchResult COP0_TLBEntryMatchesVaddr(const tlbs& entry, u32 vaddr)
 {
 	const u32 entry_hi = (vaddr & 0xffffe000) | entry.EntryHi.ASID;
-	return COP0_TLBEntryMatches(entry, entry_hi, false);
+	return COP0_TLBMatchTuple(entry, entry_hi, vaddr, false);
 }
+
+static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
+{
+	const u32 segment_class = vaddr >> 29;
+	return (segment_class != 4) && (segment_class != 5);
+}
+
+#ifdef PCSX2_DEVBUILD
+static void COP0_LogTLBProtectedSegmentWarning(const tlbs& t, int index, u32 vaddr, bool map)
+{
+	static bool s_logged = false;
+	if (s_logged)
+		return;
+	s_logged = true;
+
+	DevCon.Warning("COP0: Skipping TLB %s targeting protected direct-mapped segment (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, EntryLo0=0x%08X, EntryLo1=0x%08X)",
+		map ? "map" : "clear", vaddr, index, t.EntryHi.UL, t.PageMask.UL, t.EntryLo0.UL, t.EntryLo1.UL);
+}
+#endif
 
 static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
 {
@@ -347,12 +372,13 @@ void MapTLB(const tlbs& t, int i)
 	}
 	else
 	{
-		if (t.EntryLo0.V)
-		{
-			saddr = t.VPN2() >> 12;
-			eaddr = saddr + t.Mask() + 1;
+		saddr = t.VPN2() >> 12;
+		eaddr = saddr + ((t.Mask() + 1) * 2);
 
-			for (addr = saddr; addr < eaddr; addr++)
+		for (addr = saddr; addr < eaddr; addr++)
+		{
+			const u32 vaddr = addr << 12;
+			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
 				const u32 vaddr = addr << 12;
 				if (!COP0_IsTLBManagedVaddr(vaddr))
@@ -369,14 +395,11 @@ void MapTLB(const tlbs& t, int i)
 					Cpu->Clear(vaddr, 0x400);
 				}
 			}
-		}
 
-		if (t.EntryLo1.V)
-		{
-			saddr = (t.VPN2() >> 12) + t.Mask() + 1;
-			eaddr = saddr + t.Mask() + 1;
-
-			for (addr = saddr; addr < eaddr; addr++)
+			const COP0TLBMatchResult lookup = COP0_TLBEntryMatchesVaddr(t, vaddr);
+#ifdef PCSX2_DEVBUILD
+			const COP0TLBMatchResult probe = COP0_TLBMatchTuple(t, (vaddr & 0xffffe000) | t.EntryHi.ASID, vaddr, true);
+			if (probe.matched != lookup.matched)
 			{
 				const u32 vaddr = addr << 12;
 				if (!COP0_IsTLBManagedVaddr(vaddr))
@@ -393,6 +416,15 @@ void MapTLB(const tlbs& t, int i)
 					Cpu->Clear(vaddr, 0x400);
 				}
 			}
+#endif
+			const EntryLo_t& lo = use_odd_page ? t.EntryLo1 : t.EntryLo0;
+			if (!lo.V)
+				continue;
+
+			const u32 range_base = saddr + (use_odd_page ? page_span : 0);
+			const u32 paddr_base = use_odd_page ? t.PFN1() : t.PFN0();
+			memSetPageAddr(vaddr, paddr_base + ((addr - range_base) << 12));
+			Cpu->Clear(vaddr, 0x400);
 		}
 	}
 }
@@ -418,12 +450,9 @@ void UnmapTLB(const tlbs& t, int i)
 		return;
 	}
 
-	if (t.EntryLo0.V)
-	{
-		saddr = t.VPN2() >> 12;
-		eaddr = saddr + t.Mask() + 1;
-		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
-		for (addr = saddr; addr < eaddr; addr++)
+	saddr = t.VPN2() >> 12;
+	eaddr = saddr + ((t.Mask() + 1) * 2);
+	for (addr = saddr; addr < eaddr; addr++)
 		{
 			const u32 vaddr = addr << 12;
 			if (!COP0_IsTLBManagedVaddr(vaddr))
@@ -439,8 +468,6 @@ void UnmapTLB(const tlbs& t, int i)
 				memClearPageAddr(vaddr);
 				Cpu->Clear(vaddr, 0x400);
 			}
-		}
-	}
 
 	if (t.EntryLo1.V)
 	{
@@ -463,8 +490,27 @@ void UnmapTLB(const tlbs& t, int i)
 				memClearPageAddr(vaddr);
 				Cpu->Clear(vaddr, 0x400);
 			}
+#endif
+			if (!lookup.matched)
+				continue;
+
+#ifdef PCSX2_DEVBUILD
+			const bool expected_odd_page = (addr - saddr) >= (t.Mask() + 1);
+			if (expected_odd_page != lookup.odd_page)
+			{
+				DevCon.Warning(
+					"COP0: TLB odd/even mismatch during unmap (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, expected_odd=%d, helper_odd=%d)",
+					vaddr, i, t.EntryHi.UL, t.PageMask.UL, expected_odd_page, lookup.odd_page);
+				pxAssertRel(expected_odd_page == lookup.odd_page);
+			}
+#endif
+			const EntryLo_t& lo = lookup.odd_page ? t.EntryLo1 : t.EntryLo0;
+			if (!lo.V)
+				continue;
+
+			memClearPageAddr(vaddr);
+			Cpu->Clear(vaddr, 0x400);
 		}
-	}
 
 	for (size_t i = 0; i < cachedTlbs.count; i++)
 	{
@@ -564,6 +610,13 @@ namespace COP0 {
 		COP0_LOG("COP0_TLBWI %d:%x,%x,%x,%x",
 			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		if (TraceLogging.EE.Bios.IsActive())
+		{
+			DevCon.WriteLn(
+				"TLBWI write index=%u BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x EntryLo0=0x%08x EntryLo1=0x%08x",
+				j, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EPC,
+				cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		}
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
@@ -583,6 +636,13 @@ namespace COP0 {
 		DevCon.Warning("COP0_TLBWR %d:%x,%x,%x,%x\n",
 			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		if (TraceLogging.EE.Bios.IsActive())
+		{
+			DevCon.WriteLn(
+				"TLBWR write random=%u index=%u BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x EntryLo0=0x%08x EntryLo1=0x%08x",
+				cpuRegs.CP0.n.Random, j, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi,
+				cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		}
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
@@ -593,7 +653,7 @@ namespace COP0 {
 		cpuRegs.CP0.n.Index = 0x80000000;
 		for (u32 i = 0; i < 48; i++)
 		{
-			if (COP0_TLBEntryMatches(tlb[i], cpuRegs.CP0.n.EntryHi))
+			if (COP0_TLBMatchTuple(tlb[i], cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EntryHi & 0xffffe000, true).matched)
 			{
 				cpuRegs.CP0.n.Index = i;
 				break;

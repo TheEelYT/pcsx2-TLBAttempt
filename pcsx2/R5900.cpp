@@ -360,13 +360,40 @@ void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 				cpuRegs.pc, cpuRegs.cycle, addr, cpuRegs.CP0.n.Status.val, excode);
 	}
 
+	const bool tlb_diag_enabled = TraceLogging.EE.Bios.IsActive();
+	if (tlb_diag_enabled)
+	{
+		DevCon.WriteLn(
+			"cpuTlbMiss pre addr=0x%08x excode=0x%08x bd=%u pc=0x%08x BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x",
+			addr, excode, bd, cpuRegs.pc, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi,
+			cpuRegs.CP0.n.EPC);
+	}
+
 	cpuRegs.CP0.n.BadVAddr = addr;
 	cpuRegs.CP0.n.Context &= 0xFF80000F;
 	cpuRegs.CP0.n.Context |= (addr >> 9) & 0x007FFFF0;
-	cpuRegs.CP0.n.EntryHi = (addr & 0xFFFFE000) | (cpuRegs.CP0.n.EntryHi & 0x1FFF);
+	cpuRegs.CP0.n.EntryHi = addr & 0xFFFFE000;
 
-	cpuRegs.pc -= 4;
+	if (tlb_diag_enabled)
+	{
+		DevCon.WriteLn(
+			"cpuTlbMiss cp0-update addr=0x%08x BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x",
+			addr, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EPC);
+	}
+
+	// The interpreter pre-increments PC before executing each instruction, while the recompiler
+	// keeps cpuRegs.pc on the faulting instruction when calling into vtlb miss handlers.
+	// Only unwind for interpreter to avoid recompiler EPC off-by-one state.
+	if (Cpu == &intCpu)
+		cpuRegs.pc -= 4;
 	cpuException(excode, bd);
+
+	if (tlb_diag_enabled)
+	{
+		DevCon.WriteLn(
+			"cpuTlbMiss post-exc addr=0x%08x pc=0x%08x BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x",
+			addr, cpuRegs.pc, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EPC);
+	}
 }
 
 void cpuTlbMissR(u32 addr, u32 bd) {
