@@ -1197,13 +1197,14 @@ void memReset()
 
 	memMapPhy();
 	memMapVUmicro();
-	memMapKernelMem();
 	memMapSupervisorMem();
 	memMapUserMem();
 	memSetKernelMode();
 
-	vtlb_VMap(0x00000000,0x00000000,0x20000000);
-	vtlb_VMapUnmap(0x20000000,0x60000000);
+	// Full TLB mode: keep kuseg/suseg unmapped by default so accesses rely on TLB entries
+	// and can generate proper miss/refill exceptions.
+	vtlb_VMapUnmap(0x00000000, 0x80000000);
+	memMapKernelMem();
 
 	std::memset(s_ba, 0, sizeof(s_ba));
 

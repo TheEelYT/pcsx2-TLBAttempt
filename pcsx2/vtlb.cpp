@@ -39,6 +39,14 @@
 #define FASTMEM_LOG(...)
 //#define FASTMEM_LOG(...) Console.WriteLn(__VA_ARGS__)
 
+static constexpr bool TLB_TRACE_LOG = true;
+#define TLBTrace(...) \
+	do \
+	{ \
+		if (TLB_TRACE_LOG) \
+			Console.WriteLn(__VA_ARGS__); \
+	} while (0)
+
 using namespace R5900;
 using namespace vtlb_private;
 
@@ -51,7 +59,6 @@ namespace vtlb_private
 
 static vtlbHandler vtlbHandlerCount = 0;
 
-static vtlbHandler DefaultPhyHandler;
 static vtlbHandler UnmappedVirtHandler;
 static vtlbHandler UnmappedPhyHandler;
 
@@ -513,35 +520,24 @@ void GoemonUnloadTlb(u32 key)
 // Generates a tlbMiss Exception
 static __ri void vtlb_Miss(u32 addr, u32 mode)
 {
+	TLBTrace("[TLB] Miss pc=%08x addr=%08x mode=%s asid=%02x entryhi=%08x status=%08x", cpuRegs.pc, addr,
+		mode ? "store" : "load", cpuRegs.CP0.n.EntryHi & 0xff, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.Status.val);
+
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		GoemonTlbMissDebug();
 
-	// Hack to handle expected tlb miss by some games.
+	if (mode)
+		cpuTlbMissW(addr, cpuRegs.branch);
+	else
+		cpuTlbMissR(addr, cpuRegs.branch);
+
+	// Exception handled. Current instruction needs to be stopped.
 	if (Cpu == &intCpu)
-	{
-		if (mode)
-			cpuTlbMissW(addr, cpuRegs.branch);
-		else
-			cpuTlbMissR(addr, cpuRegs.branch);
-
-		// Exception handled. Current instruction need to be stopped
 		Cpu->CancelInstruction();
-		return;
-	}
-
-	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
-	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
-	{
-		// Pause, let the user try to figure out what went wrong in the debugger.
-		Host::ReportErrorAsync("R5900 Exception", message);
-		VMManager::SetPaused(true);
+	else
 		Cpu->ExitExecution();
-		return;
-	}
 
-	static int spamStop = 0;
-	if (spamStop++ < 50 || IsDevBuild)
-		Console.Error(message);
+	return;
 }
 
 // BusError exception: more serious than a TLB miss.  If properly emulated the PS2 kernel
@@ -549,6 +545,9 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 // time of the exception.
 static __ri void vtlb_BusError(u32 addr, u32 mode)
 {
+	TLBTrace("[TLB] BusError pc=%08x addr=%08x mode=%s asid=%02x entryhi=%08x status=%08x", cpuRegs.pc, addr,
+		mode ? "store" : "load", cpuRegs.CP0.n.EntryHi & 0xff, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.Status.val);
+
 	const std::string message(fmt::format("Bus Error, addr=0x{:x} [{}]", addr, mode ? "store" : "load"));
 	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
@@ -560,6 +559,11 @@ static __ri void vtlb_BusError(u32 addr, u32 mode)
 	}
 
 	Console.Error(message);
+
+	if (Cpu == &intCpu)
+		Cpu->CancelInstruction();
+	else
+		Cpu->ExitExecution();
 }
 
 // clang-format off
@@ -1250,12 +1254,11 @@ void vtlb_Init()
 
 	UnmappedVirtHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedV));
 	UnmappedPhyHandler = vtlb_RegisterHandler(VTLB_BuildUnmappedHandler(vtlbUnmappedP));
-	DefaultPhyHandler = vtlb_RegisterHandler(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-
 	//done !
 
 	//Setup the initial mappings
-	vtlb_MapHandler(DefaultPhyHandler, 0, VTLB_PMAP_SZ);
+	// Unmapped physical pages should trigger bus errors, not host-side asserts.
+	vtlb_MapHandler(UnmappedPhyHandler, 0, VTLB_PMAP_SZ);
 
 	//Set the V space as unmapped
 	vtlb_VMapUnmap(0, (VTLB_VMAP_ITEMS - 1) * VTLB_PAGE_SIZE);
