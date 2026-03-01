@@ -3,6 +3,9 @@
 
 #include "Common.h"
 
+#include <algorithm>
+#include <array>
+
 #include "common/StringUtil.h"
 #include "ps2/BiosTools.h"
 #include "R5900.h"
@@ -119,6 +122,26 @@ static u32 GetExceptionVectorAddress(u32 offset, bool check_status)
 	return 0xBFC00200 + offset;
 }
 
+static bool IsLikelyBiosExceptionVectorStub(const std::array<u32, 4>& ops)
+{
+	if (ops[0] == 0)
+		return false;
+
+	const u32 op0 = ops[0] >> 26;
+	if (op0 == 0x02 || op0 == 0x03)
+		return true;
+
+	// Common BIOS vector setup starts with register/immediate setup or COP0 state reads.
+	if ((ops[0] & 0xFC000000) == 0x3C000000 || // lui
+		(ops[0] & 0xFFE00000) == 0x40000000 || // mfc0/dmfc0
+		(ops[0] & 0xFC000000) == 0x24000000) // addiu
+	{
+		return true;
+	}
+
+	return false;
+}
+
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
 but in fast boot mode, the block we use can fit at least 16 argv pointers (varies with BIOS version).
 The second EELOAD call during full boot has three built-in arguments ("EELOAD rom0:PS2LOGO <ELF>"),
@@ -232,6 +255,29 @@ __ri void cpuException(u32 code, u32 bd)
 	}
 
 	const u32 vector_pc = GetExceptionVectorAddress(offset, checkStatus);
+	if (IsDevBuild || IsDebugBuild)
+	{
+		std::array<u32, 4> vector_ops;
+		for (u32 i = 0; i < vector_ops.size(); i++)
+			vector_ops[i] = memRead32(vector_pc + (i * 4));
+
+		DevCon.WriteLn(
+			"cpuException vector bytes pc=0x%08x op[0..3]=%08x %08x %08x %08x status=0x%08x cause=0x%08x epc=0x%08x",
+			vector_pc, vector_ops[0], vector_ops[1], vector_ops[2], vector_ops[3], cpuRegs.CP0.n.Status.val,
+			cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC);
+
+		const bool vectors_zero = std::all_of(vector_ops.begin(), vector_ops.end(), [](u32 op) { return op == 0; });
+		if ((vector_pc == 0x80000000 || vector_pc == 0x80000180) &&
+			(vectors_zero || !IsLikelyBiosExceptionVectorStub(vector_ops)))
+		{
+			DevCon.Warning(
+				"cpuException suspicious BIOS vector at 0x%08x: op[0..3]=%08x %08x %08x %08x status=0x%08x cause=0x%08x epc=0x%08x handlers(refill=0x%08x common=0x%08x interrupt=0x%08x)",
+				vector_pc, vector_ops[0], vector_ops[1], vector_ops[2], vector_ops[3], cpuRegs.CP0.n.Status.val,
+				cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC, cpuRegs.vtlbRefillHandler, cpuRegs.vcommonHandler,
+				cpuRegs.vinterruptHandler);
+		}
+	}
+
 	if (vector_pc == 0x80000000)
 	{
 		uptr kernel_ptr = 0;
