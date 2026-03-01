@@ -589,24 +589,66 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 	void MTC0()
 	{
 		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
+		const u32 value = cpuRegs.GPR.r[_Rt_].UL[0];
+
 		switch (_Rd_)
 		{
+			case 0:
+				// EE CP0.Index: only Index[5:0] is writable via MTC0.
+				// The probe/fail state bit (P, bit 31) is produced by TLBP and remains read-only here.
+				cpuRegs.CP0.n.Index = value & 0x3f;
+				break;
+
+			case 1:
+				// EE CP0.Random: Random[5:0] is the only writable field. Keep it in-range for TLBWR.
+				cpuRegs.CP0.n.Random = COP0_SanitizeRandomForWired(value & 0x3f, COP0_GetSanitizedWired());
+				break;
+
+			case 2:
+				// EE CP0.EntryLo0: writable fields are G/V/D/C/PFN and S (scratchpad select, bit 31).
+				// Reserved bits [30:26] are forced low.
+				cpuRegs.CP0.n.EntryLo0 = value & 0x83ffffff;
+				break;
+
+			case 3:
+				// EE CP0.EntryLo1: writable fields are G/V/D/C/PFN; upper reserved bits are fixed low.
+				cpuRegs.CP0.n.EntryLo1 = value & 0x03ffffff;
+				break;
+
+			case 4:
+				// EE CP0.Context: PTEBase[31:23] and low software bits [3:0] are writable.
+				// BadVPN2[22:4] is maintained by fault/refill address generation paths.
+				cpuRegs.CP0.n.Context = (cpuRegs.CP0.n.Context & 0x007ffff0) | (value & 0xff80000f);
+				break;
+
+			case 5:
+				// EE CP0.PageMask: only Mask[24:13] is writable.
+				cpuRegs.CP0.n.PageMask = value & 0x01ffe000;
+				break;
+
 			case 6:
-				COP0_SetWired(cpuRegs.GPR.r[_Rt_].UL[0]);
+				// EE CP0.Wired: Wired[5:0] is writable and immediately constrains Random.
+				COP0_SetWired(value);
+				break;
+
+			case 10:
+				// EE CP0.EntryHi: writable fields are VPN2[31:13] and ASID[7:0].
+				// Keeping the register canonical avoids reserved-bit pollution in TLBP/TLBWR paths.
+				cpuRegs.CP0.n.EntryHi = value & 0xffffe0ff;
 				break;
 
 			case 9:
 				COP0_UpdateRandom(cpuRegs.cycle - cpuRegs.lastCOP0Cycle);
 				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
-				cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
+				cpuRegs.CP0.r[9] = value;
 				break;
 
 			case 12:
-				WriteCP0Status(cpuRegs.GPR.r[_Rt_].UL[0]);
+				WriteCP0Status(value);
 				break;
 
 			case 16:
-				WriteCP0Config(cpuRegs.GPR.r[_Rt_].UL[0]);
+				WriteCP0Config(value);
 				break;
 
 			case 24:
@@ -622,23 +664,23 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 						break;
 					// Updates PCRs and sets the PCCR.
 					COP0_UpdatePCCR();
-					cpuRegs.PERF.n.pccr.val = cpuRegs.GPR.r[_Rt_].UL[0];
+					cpuRegs.PERF.n.pccr.val = value;
 					COP0_DiagnosticPCCR();
 				}
 				else if (0 == (_Imm_ & 2)) // MTPC 0, only LSB of register matters
 				{
-					cpuRegs.PERF.n.pcr0 = cpuRegs.GPR.r[_Rt_].UL[0];
+					cpuRegs.PERF.n.pcr0 = value;
 					cpuRegs.lastPERFCycle[0] = cpuRegs.cycle;
 				}
 				else // MTPC 1
 				{
-					cpuRegs.PERF.n.pcr1 = cpuRegs.GPR.r[_Rt_].UL[0];
+					cpuRegs.PERF.n.pcr1 = value;
 					cpuRegs.lastPERFCycle[1] = cpuRegs.cycle;
 				}
 				break;
 
 			default:
-				cpuRegs.CP0.r[_Rd_] = cpuRegs.GPR.r[_Rt_].UL[0];
+				cpuRegs.CP0.r[_Rd_] = value;
 				break;
 		}
 	}
