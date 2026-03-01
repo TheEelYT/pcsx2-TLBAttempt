@@ -167,6 +167,7 @@ extern void memBindConditionalHandlers();
 extern bool memGetExtraMemMode();
 extern void memSetExtraMemMode(bool mode);
 extern void memMapVUmicro();
+extern void memMapKernelMem();
 
 #define memRead8 vtlb_memRead<mem8_t>
 #define memRead16 vtlb_memRead<mem16_t>
