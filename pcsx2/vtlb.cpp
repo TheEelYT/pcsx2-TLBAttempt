@@ -92,6 +92,14 @@ static std::unordered_multimap<u32, u32> s_fastmem_physical_mapping; // maps mai
 static std::unordered_map<uptr, LoadstoreBackpatchInfo> s_fastmem_backpatch_info;
 static std::unordered_set<u32> s_fastmem_faulting_pcs;
 
+static __fi bool IsTLBManagedVirtualAddress(u32 vaddr)
+{
+	// kseg0/kseg1 are direct-mapped and benefit from fastmem.
+	// kuseg/suseg and kseg2/kseg3 are TLB-managed and can churn mappings heavily,
+	// which can lead to pathological fault storms with fastmem enabled.
+	return (vaddr < 0x80000000u) || (vaddr >= 0xC0000000u);
+}
+
 vtlb_private::VTLBPhysical vtlb_private::VTLBPhysical::fromPointer(sptr ptr)
 {
 	pxAssertMsg(ptr >= 0, "Address too high");
@@ -1158,6 +1166,12 @@ void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 
 		for (u32 i = 0; i < num_pages; i++, current_vaddr += VTLB_PAGE_SIZE, current_paddr += VTLB_PAGE_SIZE)
 		{
+			if (IsTLBManagedVirtualAddress(current_vaddr))
+			{
+				vtlb_RemoveFastmemMapping(current_vaddr);
+				continue;
+			}
+
 			u32 hoffset, hsize;
 			PageProtectionMode mode;
 			if (vtlb_GetMainMemoryOffset(current_paddr, &hoffset, &hsize, &mode))
@@ -1302,6 +1316,9 @@ void vtlb_ResetFastmem()
 	{
 		const VTLBVirtual& vm = vtlbdata.vmap[i];
 		const u32 vaddr = static_cast<u32>(i) << VTLB_PAGE_BITS;
+		if (IsTLBManagedVirtualAddress(vaddr))
+			continue;
+
 		if (vm.isHandler(vaddr))
 		{
 			// Handlers should be unmapped.
