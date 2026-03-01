@@ -62,9 +62,11 @@ void cpuReset()
 	std::memset(&fpuRegs, 0, sizeof(fpuRegs));
 	std::memset(&tlb, 0, sizeof(tlb));
 	cachedTlbs.count = 0;
+	ResetFullTLBMode();
 
 	cpuRegs.pc				= 0xbfc00000; //set pc reg to stack
 	cpuRegs.CP0.n.Config	= 0x440;
+	cpuRegs.CP0.n.Random	= 47;
 	cpuRegs.CP0.n.Status.val= 0x70400004; //0x10900000 <-- wrong; // COP0 enabled | BEV = 1 | TS = 1
 	cpuRegs.CP0.n.PRid		= 0x00002e20; // PRevID = Revision ID, same as R5900
 	fpuRegs.fprc[0]			= 0x00002e30; // fpu Revision..
@@ -166,10 +168,41 @@ __ri void cpuException(u32 code, u32 bd)
 
 void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 {
+	static u32 s_last_pc = 0;
+	static u32 s_last_addr = 0;
+	static u32 s_last_excode = 0;
+	static u32 s_repeat_count = 0;
+
+	if (cpuRegs.pc == s_last_pc && addr == s_last_addr && excode == s_last_excode)
+		s_repeat_count++;
+	else
+		s_repeat_count = 0;
+
+	s_last_pc = cpuRegs.pc;
+	s_last_addr = addr;
+	s_last_excode = excode;
+
 	// Avoid too much spamming on the interpreter
 	if (Cpu != &intCpu || IsDebugBuild) {
 		Console.Error("cpuTlbMiss pc:%x, cycl:%x, addr: %x, status=%x, code=%x",
 				cpuRegs.pc, cpuRegs.cycle, addr, cpuRegs.CP0.n.Status.val, excode);
+	}
+
+	if (s_repeat_count == 32 || s_repeat_count == 256 || s_repeat_count == 1024)
+	{
+		Console.Warning("[TLB] repeating miss count=%u pc=%08x addr=%08x code=%x entryhi=%08x badv=%08x ctx=%08x index=%08x wired=%08x random=%08x",
+			s_repeat_count, cpuRegs.pc, addr, excode, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.BadVAddr,
+			cpuRegs.CP0.n.Context, cpuRegs.CP0.n.Index, cpuRegs.CP0.n.Wired, cpuRegs.CP0.n.Random);
+
+		for (int i = 0; i < 48; i++)
+		{
+			if (!tlb[i].EntryLo0.V && !tlb[i].EntryLo1.V && !tlb[i].isSPR())
+				continue;
+
+			Console.WriteLn("[TLB]  idx=%02d mask=%08x hi=%08x lo0=%08x lo1=%08x vpn2=%08x pfn0=%08x pfn1=%08x g=%d spr=%d",
+				i, tlb[i].PageMask.UL, tlb[i].EntryHi.UL, tlb[i].EntryLo0.UL, tlb[i].EntryLo1.UL,
+				tlb[i].VPN2(), tlb[i].PFN0(), tlb[i].PFN1(), tlb[i].isGlobal() ? 1 : 0, tlb[i].isSPR() ? 1 : 0);
+		}
 	}
 
 	cpuRegs.CP0.n.BadVAddr = addr;
