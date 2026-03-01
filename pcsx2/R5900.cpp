@@ -78,6 +78,40 @@ void SetVTLBRefillHandlerAddress(u32 addr)
 	cpuRegs.vtlbRefillHandler = (addr & 0x1FFFFFFF) | 0x80000000;
 }
 
+void SetVCommonHandlerAddress(u32 addr)
+{
+	if (addr == 0)
+	{
+		cpuRegs.vcommonHandler = 0;
+		return;
+	}
+
+	if (!IsValidVTLBRefillHandlerAddress(addr))
+	{
+		DevCon.Warning("Ignoring invalid SetVCommonHandler address 0x%08x", addr);
+		return;
+	}
+
+	cpuRegs.vcommonHandler = (addr & 0x1FFFFFFF) | 0x80000000;
+}
+
+void SetVInterruptHandlerAddress(u32 addr)
+{
+	if (addr == 0)
+	{
+		cpuRegs.vinterruptHandler = 0;
+		return;
+	}
+
+	if (!IsValidVTLBRefillHandlerAddress(addr))
+	{
+		DevCon.Warning("Ignoring invalid SetVInterruptHandler address 0x%08x", addr);
+		return;
+	}
+
+	cpuRegs.vinterruptHandler = (addr & 0x1FFFFFFF) | 0x80000000;
+}
+
 static u32 GetExceptionVectorAddress(u32 offset, bool check_status)
 {
 	if (check_status)
@@ -101,6 +135,8 @@ void cpuReset()
 	std::memset(&tlb, 0, sizeof(tlb));
 	cachedTlbs.count = 0;
 	cpuRegs.vtlbRefillHandler = 0;
+	cpuRegs.vcommonHandler = 0;
+	cpuRegs.vinterruptHandler = 0;
 
 	cpuRegs.pc				= 0xbfc00000; //set pc reg to stack
 	cpuRegs.CP0.n.Config	= 0x440;
@@ -205,9 +241,25 @@ __ri void cpuException(u32 code, u32 bd)
 	}
 
 	if ((offset == 0x0) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vtlbRefillHandler))
+	{
 		cpuRegs.pc = cpuRegs.vtlbRefillHandler;
+		BIOS_LOG("cpuException dispatch: refill vector->installed (pc=0x%08x, code=0x%08x)", cpuRegs.pc, code);
+	}
+	else if ((offset == 0x180) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vcommonHandler))
+	{
+		cpuRegs.pc = cpuRegs.vcommonHandler;
+		BIOS_LOG("cpuException dispatch: common vector->installed (pc=0x%08x, code=0x%08x)", cpuRegs.pc, code);
+	}
+	else if ((offset == 0x200) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vinterruptHandler))
+	{
+		cpuRegs.pc = cpuRegs.vinterruptHandler;
+		BIOS_LOG("cpuException dispatch: interrupt vector->installed (pc=0x%08x, code=0x%08x)", cpuRegs.pc, code);
+	}
 	else
+	{
 		cpuRegs.pc = vector_pc;
+		BIOS_LOG("cpuException dispatch: vector base (offset=0x%03x, pc=0x%08x, code=0x%08x)", offset, cpuRegs.pc, code);
+	}
 
 	cpuUpdateOperationMode();
 }

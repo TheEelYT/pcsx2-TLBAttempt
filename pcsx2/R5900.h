@@ -136,10 +136,14 @@ struct cpuRegisters {
 	u32 lastCOP0Cycle;
 	u32 lastPERFCycle[2];
 	u32 vtlbRefillHandler;
+	u32 vcommonHandler;
+	u32 vinterruptHandler;
 };
 
 bool IsValidVTLBRefillHandlerAddress(u32 addr);
 void SetVTLBRefillHandlerAddress(u32 addr);
+void SetVCommonHandlerAddress(u32 addr);
+void SetVInterruptHandlerAddress(u32 addr);
 
 // used for optimization
 union GPR_reg64 {

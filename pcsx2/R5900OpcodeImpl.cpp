@@ -1068,6 +1068,24 @@ void SYSCALL()
 			BIOS_LOG("SetVTLBRefillHandler(a0=0x%08x, a1=0x%08x, canonical=0x%08x)", a0, a1, cpuRegs.vtlbRefillHandler);
 		}
 			break;
+		case Syscall::SetVCommonHandler:
+		{
+			const u32 a0 = cpuRegs.GPR.n.a0.UL[0];
+			const u32 a1 = cpuRegs.GPR.n.a1.UL[0];
+			const u32 handler = a0;
+			SetVCommonHandlerAddress(handler);
+			BIOS_LOG("SetVCommonHandler(a0=0x%08x, a1=0x%08x, canonical=0x%08x)", a0, a1, cpuRegs.vcommonHandler);
+		}
+			break;
+		case Syscall::SetVInterruptHandler:
+		{
+			const u32 a0 = cpuRegs.GPR.n.a0.UL[0];
+			const u32 a1 = cpuRegs.GPR.n.a1.UL[0];
+			const u32 handler = a0;
+			SetVInterruptHandlerAddress(handler);
+			BIOS_LOG("SetVInterruptHandler(a0=0x%08x, a1=0x%08x, canonical=0x%08x)", a0, a1, cpuRegs.vinterruptHandler);
+		}
+			break;
 		case Syscall::StartThread:
 		case Syscall::ChangeThreadPriority:
 		{
