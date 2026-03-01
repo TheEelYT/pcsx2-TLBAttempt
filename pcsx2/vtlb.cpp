@@ -516,19 +516,6 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		GoemonTlbMissDebug();
 
-	// Hack to handle expected tlb miss by some games.
-	if (Cpu == &intCpu)
-	{
-		if (mode)
-			cpuTlbMissW(addr, cpuRegs.branch);
-		else
-			cpuTlbMissR(addr, cpuRegs.branch);
-
-		// Exception handled. Current instruction need to be stopped
-		Cpu->CancelInstruction();
-		return;
-	}
-
 	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
 	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
@@ -542,6 +529,18 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	static int spamStop = 0;
 	if (spamStop++ < 50 || IsDevBuild)
 		Console.Error(message);
+
+	if (mode)
+		cpuTlbMissW(addr, cpuRegs.branch);
+	else
+		cpuTlbMissR(addr, cpuRegs.branch);
+
+	// Interpreter can restart the current instruction directly. The recompiler must
+	// unwind back to its dispatcher after exception state has been committed.
+	if (Cpu == &intCpu)
+		Cpu->CancelInstruction();
+	else
+		Cpu->ExitExecution();
 }
 
 // BusError exception: more serious than a TLB miss.  If properly emulated the PS2 kernel
