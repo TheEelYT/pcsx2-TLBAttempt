@@ -375,49 +375,23 @@ void MapTLB(const tlbs& t, int i)
 			const u32 vaddr = addr << 12;
 			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
-				const u32 vaddr = addr << 12;
-				if (!COP0_IsTLBManagedVaddr(vaddr))
-				{
 #ifdef PCSX2_DEVBUILD
-					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, false);
+				COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, false);
 #endif
-					continue;
-				}
-
-				if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
-				{ //match
-					memSetPageAddr(vaddr, t.PFN0() + ((addr - saddr) << 12));
-					Cpu->Clear(vaddr, 0x400);
-				}
+				continue;
 			}
 
 			const COP0TLBMatchResult lookup = COP0_TLBEntryMatchesVaddr(t, vaddr);
-#ifdef PCSX2_DEVBUILD
-			const COP0TLBMatchResult probe = COP0_TLBMatchTuple(t, (vaddr & 0xffffe000) | t.EntryHi.ASID, vaddr, true);
-			if (probe.matched != lookup.matched)
-			{
-				const u32 vaddr = addr << 12;
-				if (!COP0_IsTLBManagedVaddr(vaddr))
-				{
-#ifdef PCSX2_DEVBUILD
-					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, true);
-#endif
-					continue;
-				}
+			if (!lookup.matched)
+				continue;
 
-				if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
-				{ //match
-					memSetPageAddr(vaddr, t.PFN1() + ((addr - saddr) << 12));
-					Cpu->Clear(vaddr, 0x400);
-				}
-			}
-#endif
-			const EntryLo_t& lo = use_odd_page ? t.EntryLo1 : t.EntryLo0;
+			const EntryLo_t& lo = lookup.odd_page ? t.EntryLo1 : t.EntryLo0;
 			if (!lo.V)
 				continue;
 
-			const u32 range_base = saddr + (use_odd_page ? page_span : 0);
-			const u32 paddr_base = use_odd_page ? t.PFN1() : t.PFN0();
+			const u32 page_span = t.Mask() + 1;
+			const u32 range_base = saddr + (lookup.odd_page ? page_span : 0);
+			const u32 paddr_base = lookup.odd_page ? t.PFN1() : t.PFN0();
 			memSetPageAddr(vaddr, paddr_base + ((addr - range_base) << 12));
 			Cpu->Clear(vaddr, 0x400);
 		}
