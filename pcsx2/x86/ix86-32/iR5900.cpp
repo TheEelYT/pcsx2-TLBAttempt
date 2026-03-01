@@ -2174,6 +2174,21 @@ static bool recSkipTimeoutLoop(s32 reg, bool is_timeout_loop)
 	return true;
 }
 
+static bool recAbortRecompileCorruption(const char* reason, const u32 startpc)
+{
+	Console.Error("[EE] recRecompile corruption detected (%s). startpc=0x%08X", reason, startpc);
+	Console.Error("[EE] CPU state: pc=0x%08X EPC=0x%08X ErrorEPC=0x%08X Status=0x%08X Cause=0x%08X BadVAddr=0x%08X EntryHi=0x%08X",
+		cpuRegs.pc, cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.ErrorEPC, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.EntryHi);
+
+	if (BASEBLOCK* const block = PC_GETBLOCK(startpc))
+		block->SetFnptr((uptr)DispatcherReg);
+
+	VMManager::SetPaused(true);
+	Cpu->ExitExecution();
+	return false;
+}
+
 static void recRecompile(const u32 startpc)
 {
 	u32 i = 0;
@@ -2198,13 +2213,40 @@ static void recRecompile(const u32 startpc)
 	recPtr = xGetAlignedCallTarget();
 
 	s_pCurBlock = PC_GETBLOCK(startpc);
+	if (!s_pCurBlock)
+	{
+		if (!recAbortRecompileCorruption("missing base block", startpc))
+			return;
+	}
+
+#ifndef _DEBUG
+	if (s_pCurBlock->GetFnptr() != (uptr)JITCompile)
+	{
+		if (!recAbortRecompileCorruption("unexpected block fnptr", startpc))
+			return;
+	}
+#endif
 
 	pxAssert(s_pCurBlock->GetFnptr() == (uptr)JITCompile);
 
 	s_pCurBlockEx = recBlocks.Get(HWADDR(startpc));
+#ifndef _DEBUG
+	if (s_pCurBlockEx && s_pCurBlockEx->startpc == HWADDR(startpc))
+	{
+		if (!recAbortRecompileCorruption("duplicate block metadata", startpc))
+			return;
+	}
+#endif
 	pxAssert(!s_pCurBlockEx || s_pCurBlockEx->startpc != HWADDR(startpc));
 
 	s_pCurBlockEx = recBlocks.New(HWADDR(startpc), (uptr)recPtr);
+#ifndef _DEBUG
+	if (!s_pCurBlockEx)
+	{
+		if (!recAbortRecompileCorruption("failed to allocate block metadata", startpc))
+			return;
+	}
+#endif
 
 	pxAssert(s_pCurBlockEx);
 
