@@ -34,6 +34,52 @@ void WriteCP0Config(u32 value)
 	cpuRegs.CP0.n.Config |= 0x440;
 }
 
+
+static __fi u32 COP0_GetSanitizedWired()
+{
+	return std::min(cpuRegs.CP0.n.Wired & 0x3f, 47u);
+}
+
+static __fi u32 COP0_SanitizeRandomForWired(u32 random, u32 wired)
+{
+	const u32 rand_index = random & 0x3f;
+	if (rand_index < wired || rand_index > 47)
+		return 47;
+
+	return rand_index;
+}
+
+void COP0_SetWired(u32 value)
+{
+	cpuRegs.CP0.n.Wired = value & 0x3f;
+	const u32 wired = COP0_GetSanitizedWired();
+	cpuRegs.CP0.n.Random = COP0_SanitizeRandomForWired(cpuRegs.CP0.n.Random, wired);
+}
+
+void COP0_UpdateRandom(u32 cycle_delta)
+{
+	if (cycle_delta == 0)
+		return;
+
+	const u32 wired = COP0_GetSanitizedWired();
+	if (wired >= 47)
+	{
+		cpuRegs.CP0.n.Random = 47;
+		return;
+	}
+
+	const u32 span = 48 - wired;
+	const u32 random = COP0_SanitizeRandomForWired(cpuRegs.CP0.n.Random, wired);
+	const u32 position = random - wired;
+	const u32 decremented = (position + span - (cycle_delta % span)) % span;
+	cpuRegs.CP0.n.Random = wired + decremented;
+}
+
+void COP0_UpdateRandom()
+{
+	COP0_UpdateRandom(1);
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 // Performance Counters Update Stuff!
 //
@@ -438,11 +484,12 @@ namespace COP0 {
 
 	void TLBWR()
 	{
-		const u8 j = cpuRegs.CP0.n.Random & 0x3f;
+		const u32 wired = COP0_GetSanitizedWired();
+		const u8 j = static_cast<u8>(COP0_SanitizeRandomForWired(cpuRegs.CP0.n.Random, wired));
 
-		if (j > 47)
+		if (j < wired || j > 47)
 		{
-			Console.Warning("TLBWR with random > 47! (%d)", j);
+			Console.Warning("TLBWR selected invalid random index (%d), Wired=%d", j, wired);
 			return;
 		}
 
@@ -526,6 +573,7 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 				u32 incr = cpuRegs.cycle - cpuRegs.lastCOP0Cycle;
 				if (incr == 0)
 					incr++;
+				COP0_UpdateRandom(incr);
 				cpuRegs.CP0.n.Count += incr;
 				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
 				if (!_Rt_)
@@ -543,7 +591,12 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
 		switch (_Rd_)
 		{
+			case 6:
+				COP0_SetWired(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
 			case 9:
+				COP0_UpdateRandom(cpuRegs.cycle - cpuRegs.lastCOP0Cycle);
 				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
 				cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
 				break;

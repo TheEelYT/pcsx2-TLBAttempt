@@ -14,3 +14,7 @@ extern void MapTLB(const tlbs& t, int i);
 
 extern void COP0_UpdatePCCR();
 extern void COP0_DiagnosticPCCR();
+
+extern void COP0_UpdateRandom();
+extern void COP0_UpdateRandom(u32 cycle_delta);
+extern void COP0_SetWired(u32 value);

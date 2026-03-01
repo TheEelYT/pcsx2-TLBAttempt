@@ -317,7 +317,9 @@ static __fi bool _cpuTestInterrupts()
 
 static __fi void _cpuTestTIMR()
 {
-	cpuRegs.CP0.n.Count += cpuRegs.cycle - cpuRegs.lastCOP0Cycle;
+	const u32 cop0_delta = cpuRegs.cycle - cpuRegs.lastCOP0Cycle;
+	COP0_UpdateRandom(cop0_delta);
+	cpuRegs.CP0.n.Count += cop0_delta;
 	cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
 
 	// fixme: this looks like a hack to make up for the fact that the TIMR
