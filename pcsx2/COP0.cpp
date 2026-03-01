@@ -5,7 +5,7 @@
 #include "COP0.h"
 
 #ifdef PCSX2_DEVBUILD
-#include <unordered_set>
+#include <array>
 #endif
 
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
@@ -88,19 +88,61 @@ static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
 }
 
 #ifdef PCSX2_DEVBUILD
-static void COP0_LogSkippedTLBPageOpOnce(int index, u32 vaddr, bool map, bool odd_page)
+struct TLBVectorPageLogRateLimitKey
 {
-	static std::unordered_set<u64> s_logged_signatures;
-	const u64 signature = (static_cast<u64>(map) << 63) |
-		(static_cast<u64>(odd_page) << 62) |
-		(static_cast<u64>(index & 0xff) << 32) |
-		static_cast<u64>(vaddr);
+	u32 index;
+	u32 entry_hi;
+	u32 page_mask;
+	u32 entry_lo0;
+	u32 entry_lo1;
+	bool map;
 
-	if (!s_logged_signatures.insert(signature).second)
+	bool operator==(const TLBVectorPageLogRateLimitKey& rhs) const = default;
+};
+
+static bool COP0_ShouldLogTLBVectorPageWarning(const TLBVectorPageLogRateLimitKey& key)
+{
+	static constexpr u32 kInitialBurstCount = 4;
+	static constexpr u32 kEveryNthAfterBurst = 64;
+	static std::array<std::pair<TLBVectorPageLogRateLimitKey, u32>, 16> s_recent_keys{};
+	static size_t s_next_replace = 0;
+
+	for (auto& entry : s_recent_keys)
+	{
+		TLBVectorPageLogRateLimitKey& saved_key = entry.first;
+		u32& count = entry.second;
+
+		if (count != 0 && saved_key == key)
+		{
+			count++;
+			return (count <= kInitialBurstCount) || ((count % kEveryNthAfterBurst) == 0);
+		}
+	}
+
+	std::pair<TLBVectorPageLogRateLimitKey, u32>& entry = s_recent_keys[s_next_replace++ % s_recent_keys.size()];
+	TLBVectorPageLogRateLimitKey& saved_key = entry.first;
+	u32& count = entry.second;
+	saved_key = key;
+	count = 1;
+	return true;
+}
+
+static void COP0_LogTLBVectorPageWarning(const tlbs& t, int index, u32 vaddr, bool map)
+{
+	const TLBVectorPageLogRateLimitKey key{
+		static_cast<u32>(index),
+		t.EntryHi.UL,
+		t.PageMask.UL,
+		t.EntryLo0.UL,
+		t.EntryLo1.UL,
+		map,
+	};
+
+	if (!COP0_ShouldLogTLBVectorPageWarning(key))
 		return;
 
-	DevCon.Warning("COP0: Skipping %s TLB page op for non-TLB-managed vaddr 0x%08X (index=%d, page=%u)",
-		map ? "map" : "unmap", vaddr, index, odd_page ? 1 : 0);
+	DevCon.Warning("COP0: Skipping TLB %s for vector-space candidate page (target_vpage=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, EntryLo0=0x%08X, EntryLo1=0x%08X)",
+		map ? "map" : "clear", vaddr, index, t.EntryHi.UL, t.PageMask.UL, t.EntryLo0.UL, t.EntryLo1.UL);
 }
 #endif
 
@@ -358,7 +400,7 @@ void MapTLB(const tlbs& t, int i)
 				if (!COP0_IsTLBManagedVaddr(vaddr))
 				{
 #ifdef PCSX2_DEVBUILD
-					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, false);
+					COP0_LogTLBVectorPageWarning(t, i, vaddr, true);
 #endif
 					continue;
 				}
@@ -382,7 +424,7 @@ void MapTLB(const tlbs& t, int i)
 				if (!COP0_IsTLBManagedVaddr(vaddr))
 				{
 #ifdef PCSX2_DEVBUILD
-					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, true);
+					COP0_LogTLBVectorPageWarning(t, i, vaddr, true);
 #endif
 					continue;
 				}
@@ -429,7 +471,7 @@ void UnmapTLB(const tlbs& t, int i)
 			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
 #ifdef PCSX2_DEVBUILD
-				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, false);
+				COP0_LogTLBVectorPageWarning(t, i, vaddr, false);
 #endif
 				continue;
 			}
@@ -453,7 +495,7 @@ void UnmapTLB(const tlbs& t, int i)
 			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
 #ifdef PCSX2_DEVBUILD
-				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, true);
+				COP0_LogTLBVectorPageWarning(t, i, vaddr, false);
 #endif
 				continue;
 			}
