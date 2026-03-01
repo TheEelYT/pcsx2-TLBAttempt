@@ -1061,9 +1061,11 @@ void SYSCALL()
 			break;
 		case Syscall::SetVTLBRefillHandler:
 		{
-			const u32 handler = cpuRegs.GPR.n.a1.UL[0];
+			const u32 a0 = cpuRegs.GPR.n.a0.UL[0];
+			const u32 a1 = cpuRegs.GPR.n.a1.UL[0];
+			const u32 handler = a0;
 			SetVTLBRefillHandlerAddress(handler);
-			BIOS_LOG("SetVTLBRefillHandler(handler=0x%08x, canonical=0x%08x)", handler, cpuRegs.vtlbRefillHandler);
+			BIOS_LOG("SetVTLBRefillHandler(a0=0x%08x, a1=0x%08x, canonical=0x%08x)", a0, a1, cpuRegs.vtlbRefillHandler);
 		}
 			break;
 		case Syscall::StartThread:
