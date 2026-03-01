@@ -169,6 +169,13 @@ static void execI()
 #endif
 
 	const u32 pc = cpuRegs.pc;
+	if (TraceLogging.EE.Bios.IsActive() && (pc == 0x80000000 || pc == 0x80000180))
+	{
+		DevCon.WriteLn(
+			"EE vector entry pc=0x%08x BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x",
+			pc, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EPC);
+	}
+
 	// We need to increase the pc before executing the memRead32. An exception could appears
 	// and it expects the PC counter to be pre-incremented
 	cpuRegs.pc += 4;

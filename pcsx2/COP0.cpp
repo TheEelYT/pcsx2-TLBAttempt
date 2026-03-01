@@ -557,6 +557,13 @@ namespace COP0 {
 		COP0_LOG("COP0_TLBWI %d:%x,%x,%x,%x",
 			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		if (TraceLogging.EE.Bios.IsActive())
+		{
+			DevCon.WriteLn(
+				"TLBWI write index=%u BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x EntryLo0=0x%08x EntryLo1=0x%08x",
+				j, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EPC,
+				cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		}
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
@@ -576,6 +583,13 @@ namespace COP0 {
 		DevCon.Warning("COP0_TLBWR %d:%x,%x,%x,%x\n",
 			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		if (TraceLogging.EE.Bios.IsActive())
+		{
+			DevCon.WriteLn(
+				"TLBWR write random=%u index=%u BadVAddr=0x%08x Context=0x%08x EntryHi=0x%08x EPC=0x%08x EntryLo0=0x%08x EntryLo1=0x%08x",
+				cpuRegs.CP0.n.Random, j, cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.Context, cpuRegs.CP0.n.EntryHi,
+				cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		}
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
