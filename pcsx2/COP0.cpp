@@ -410,7 +410,6 @@ __inline u32 ConvertPageMask(const u32 PageMask)
 void UnmapTLB(const tlbs& t, int i)
 {
 	//Console.WriteLn("Clear TLB %d: %08x-> [%08x %08x] S=%d G=%d ASID=%d Mask= %03X", i,t.VPN2,t.PFN0,t.PFN1,t.S,t.G,t.ASID,t.Mask);
-	u32 addr;
 	u32 saddr, eaddr;
 
 	if (t.isSPR())
@@ -421,65 +420,39 @@ void UnmapTLB(const tlbs& t, int i)
 
 	saddr = t.VPN2() >> 12;
 	eaddr = saddr + ((t.Mask() + 1) * 2);
-	for (addr = saddr; addr < eaddr; addr++)
-		{
-			const u32 vaddr = addr << 12;
-			if (!COP0_IsTLBManagedVaddr(vaddr))
-			{
-#ifdef PCSX2_DEVBUILD
-				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, false);
-#endif
-				continue;
-			}
-
-			if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
-			{ //match
-				memClearPageAddr(vaddr);
-				Cpu->Clear(vaddr, 0x400);
-			}
-
-	if (t.EntryLo1.V)
+	for (u32 addr = saddr; addr < eaddr; addr++)
 	{
-		saddr = (t.VPN2() >> 12) + t.Mask() + 1;
-		eaddr = saddr + t.Mask() + 1;
-		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
-		for (addr = saddr; addr < eaddr; addr++)
+		const u32 vaddr = addr << 12;
+		if (!COP0_IsTLBManagedVaddr(vaddr))
 		{
-			const u32 vaddr = addr << 12;
-			if (!COP0_IsTLBManagedVaddr(vaddr))
-			{
 #ifdef PCSX2_DEVBUILD
-				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, true);
+			const bool odd_page = (addr - saddr) >= (t.Mask() + 1);
+			COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, odd_page);
 #endif
-				continue;
-			}
-
-			if (COP0_TLBEntryMatchesVaddr(t, vaddr).matched)
-			{ //match
-				memClearPageAddr(vaddr);
-				Cpu->Clear(vaddr, 0x400);
-			}
-#endif
-			if (!lookup.matched)
-				continue;
-
-#ifdef PCSX2_DEVBUILD
-			const bool expected_odd_page = (addr - saddr) >= (t.Mask() + 1);
-			if (expected_odd_page != lookup.odd_page)
-			{
-				DevCon.Warning(
-					"COP0: TLB odd/even mismatch during unmap (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, expected_odd=%d, helper_odd=%d)",
-					vaddr, i, t.EntryHi.UL, t.PageMask.UL, expected_odd_page, lookup.odd_page);
-				pxAssertRel(expected_odd_page == lookup.odd_page);
-			}
-#endif
-			const EntryLo_t& lo = lookup.odd_page ? t.EntryLo1 : t.EntryLo0;
-			if (!lo.V)
-				continue;
-
-			memClearPageAddr(vaddr);
-			Cpu->Clear(vaddr, 0x400);
+			continue;
 		}
+
+		const COP0TLBMatchResult lookup = COP0_TLBEntryMatchesVaddr(t, vaddr);
+		if (!lookup.matched)
+			continue;
+
+#ifdef PCSX2_DEVBUILD
+		const bool expected_odd_page = (addr - saddr) >= (t.Mask() + 1);
+		if (expected_odd_page != lookup.odd_page)
+		{
+			DevCon.Warning(
+				"COP0: TLB odd/even mismatch during unmap (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, expected_odd=%d, helper_odd=%d)",
+				vaddr, i, t.EntryHi.UL, t.PageMask.UL, expected_odd_page, lookup.odd_page);
+			pxAssertRel(expected_odd_page == lookup.odd_page);
+		}
+#endif
+		const EntryLo_t& lo = lookup.odd_page ? t.EntryLo1 : t.EntryLo0;
+		if (!lo.V)
+			continue;
+
+		memClearPageAddr(vaddr);
+		Cpu->Clear(vaddr, 0x400);
+	}
 
 	for (size_t i = 0; i < cachedTlbs.count; i++)
 	{
