@@ -156,10 +156,13 @@ static bool ShouldLogExceptionDiagnostics(const ExceptionLogRateLimitKey& key)
 	static constexpr u32 kInitialBurstCount = 4;
 	static constexpr u32 kEveryNthAfterBurst = 64;
 	static std::array<std::pair<ExceptionLogRateLimitKey, u32>, 16> s_recent_keys{};
-	static usize s_next_replace = 0;
+	static size_t s_next_replace = 0;
 
-	for (auto& [saved_key, count] : s_recent_keys)
+	for (auto& entry : s_recent_keys)
 	{
+		ExceptionLogRateLimitKey& saved_key = entry.first;
+		u32& count = entry.second;
+
 		if (count != 0 && saved_key == key)
 		{
 			count++;
@@ -167,7 +170,9 @@ static bool ShouldLogExceptionDiagnostics(const ExceptionLogRateLimitKey& key)
 		}
 	}
 
-	auto& [saved_key, count] = s_recent_keys[s_next_replace++ % s_recent_keys.size()];
+	std::pair<ExceptionLogRateLimitKey, u32>& entry = s_recent_keys[s_next_replace++ % s_recent_keys.size()];
+	ExceptionLogRateLimitKey& saved_key = entry.first;
+	u32& count = entry.second;
 	saved_key = key;
 	count = 1;
 	return true;
