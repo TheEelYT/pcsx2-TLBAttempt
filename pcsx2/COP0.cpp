@@ -443,7 +443,7 @@ void UnmapTLB(const tlbs& t, int i)
 			DevCon.Warning(
 				"COP0: TLB odd/even mismatch during unmap (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, expected_odd=%d, helper_odd=%d)",
 				vaddr, i, t.EntryHi.UL, t.PageMask.UL, expected_odd_page, lookup.odd_page);
-			pxAssertRel(expected_odd_page == lookup.odd_page);
+			pxAssertRel(expected_odd_page == lookup.odd_page, "COP0 odd/even page mismatch during TLB unmap");
 		}
 #endif
 		const EntryLo_t& lo = lookup.odd_page ? t.EntryLo1 : t.EntryLo0;
