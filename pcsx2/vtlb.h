@@ -63,6 +63,7 @@ extern void vtlb_ReassignHandler( vtlbHandler rv,
 extern void vtlb_MapHandler(vtlbHandler handler,u32 start,u32 size);
 extern void vtlb_MapBlock(void* base,u32 start,u32 size,u32 blocksize=0);
 extern void* vtlb_GetPhyPtr(u32 paddr);
+extern bool vtlb_IsKernelDirectVirtualAddressMapped(u32 vaddr, uptr* host_ptr);
 //extern void vtlb_Mirror(u32 new_region,u32 start,u32 size); // -> not working yet :(
 extern u32  vtlb_V2P(u32 vaddr);
 extern void vtlb_DynV2P();
