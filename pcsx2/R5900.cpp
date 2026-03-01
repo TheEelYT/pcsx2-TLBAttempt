@@ -10,6 +10,7 @@
 #include "ps2/pgif.h" // pgif init
 #include "VUmicro.h"
 #include "COP0.h"
+#include "vtlb.h"
 #include "MTVU.h"
 #include "VMManager.h"
 
@@ -68,6 +69,13 @@ void SetVTLBRefillHandlerAddress(u32 addr)
 	}
 
 	cpuRegs.vtlbRefillHandler = addr;
+}
+
+static u32 GetExceptionVectorAddress(u32 offset, bool check_status)
+{
+	if (check_status)
+		return 0x80000000 + offset;
+	return 0xBFC00200 + offset;
 }
 
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
@@ -180,12 +188,19 @@ __ri void cpuException(u32 code, u32 bd)
 		if (errLevel2) Console.Warning("cpuException: Status.EXL = 1 cause %x", code);
 	}
 
+	const u32 vector_pc = GetExceptionVectorAddress(offset, checkStatus);
+	if (vector_pc == 0x80000000)
+	{
+		uptr kernel_ptr = 0;
+		const bool kernel_mapped = vtlb_IsKernelDirectVirtualAddressMapped(vector_pc, &kernel_ptr);
+		DevCon.WriteLn("cpuException: kseg0 vector 0x%08x mapped=%s host=%p refill=0x%08x code=0x%08x",
+			vector_pc, kernel_mapped ? "true" : "false", reinterpret_cast<void*>(kernel_ptr), cpuRegs.vtlbRefillHandler, code);
+	}
+
 	if ((offset == 0x0) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vtlbRefillHandler))
 		cpuRegs.pc = cpuRegs.vtlbRefillHandler;
-	else if (checkStatus)
-		cpuRegs.pc = 0x80000000 + offset;
 	else
-		cpuRegs.pc = 0xBFC00200 + offset;
+		cpuRegs.pc = vector_pc;
 
 	cpuUpdateOperationMode();
 }

@@ -796,6 +796,20 @@ __fi void* vtlb_GetPhyPtr(u32 paddr)
 		return reinterpret_cast<void*>(vtlbdata.pmap[paddr >> VTLB_PAGE_BITS].assumePtr() + (paddr & VTLB_PAGE_MASK));
 }
 
+bool vtlb_IsKernelDirectVirtualAddressMapped(u32 vaddr, uptr* host_ptr)
+{
+	if ((vaddr & 0xE0000000) != 0x80000000)
+		return false;
+
+	const VTLBVirtual vmv = vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS];
+	if (vmv.isHandler(vaddr))
+		return false;
+
+	if (host_ptr)
+		*host_ptr = vmv.assumePtr(vaddr);
+	return true;
+}
+
 __fi u32 vtlb_V2P(u32 vaddr)
 {
 	u32 paddr = vtlbdata.ppmap[vaddr >> VTLB_PAGE_BITS];
