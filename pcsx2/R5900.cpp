@@ -142,6 +142,37 @@ static bool IsLikelyBiosExceptionVectorStub(const std::array<u32, 4>& ops)
 	return false;
 }
 
+struct ExceptionLogRateLimitKey
+{
+	u32 vector_pc;
+	u32 cause;
+	u32 pc;
+
+	bool operator==(const ExceptionLogRateLimitKey& rhs) const = default;
+};
+
+static bool ShouldLogExceptionDiagnostics(const ExceptionLogRateLimitKey& key)
+{
+	static constexpr u32 kInitialBurstCount = 4;
+	static constexpr u32 kEveryNthAfterBurst = 64;
+	static std::array<std::pair<ExceptionLogRateLimitKey, u32>, 16> s_recent_keys{};
+	static usize s_next_replace = 0;
+
+	for (auto& [saved_key, count] : s_recent_keys)
+	{
+		if (count != 0 && saved_key == key)
+		{
+			count++;
+			return (count <= kInitialBurstCount) || ((count % kEveryNthAfterBurst) == 0);
+		}
+	}
+
+	auto& [saved_key, count] = s_recent_keys[s_next_replace++ % s_recent_keys.size()];
+	saved_key = key;
+	count = 1;
+	return true;
+}
+
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
 but in fast boot mode, the block we use can fit at least 16 argv pointers (varies with BIOS version).
 The second EELOAD call during full boot has three built-in arguments ("EELOAD rom0:PS2LOGO <ELF>"),
@@ -255,7 +286,13 @@ __ri void cpuException(u32 code, u32 bd)
 	}
 
 	const u32 vector_pc = GetExceptionVectorAddress(offset, checkStatus);
-	if (IsDevBuild || IsDebugBuild)
+	const bool vector_diag_enabled = TraceLogging.EE.Bios.IsActive();
+	const bool in_vector_refill_or_general_loop =
+		checkStatus && ((offset == 0x0) || (offset == 0x180)) &&
+		(cpuRegs.pc == vector_pc || cpuRegs.CP0.n.EPC == vector_pc);
+	const ExceptionLogRateLimitKey rate_limit_key{vector_pc, cpuRegs.CP0.n.Cause, cpuRegs.pc};
+
+	if (vector_diag_enabled && !in_vector_refill_or_general_loop && ShouldLogExceptionDiagnostics(rate_limit_key))
 	{
 		std::array<u32, 4> vector_ops;
 		for (u32 i = 0; i < vector_ops.size(); i++)
