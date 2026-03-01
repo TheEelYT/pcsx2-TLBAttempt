@@ -4,6 +4,10 @@
 #include "Common.h"
 #include "COP0.h"
 
+#ifdef PCSX2_DEVBUILD
+#include <unordered_set>
+#endif
+
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
 // Given this function is called so much, it's commented out for now. (rama)
@@ -100,6 +104,28 @@ static void COP0_LogTLBProtectedSegmentWarning(const tlbs& t, int index, u32 vad
 
 	DevCon.Warning("COP0: Skipping TLB %s targeting protected direct-mapped segment (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, EntryLo0=0x%08X, EntryLo1=0x%08X)",
 		map ? "map" : "clear", vaddr, index, t.EntryHi.UL, t.PageMask.UL, t.EntryLo0.UL, t.EntryLo1.UL);
+}
+#endif
+
+static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
+{
+	return (vaddr & 0x80000000) == 0;
+}
+
+#ifdef PCSX2_DEVBUILD
+static void COP0_LogSkippedTLBPageOpOnce(int index, u32 vaddr, bool map, bool odd_page)
+{
+	static std::unordered_set<u64> s_logged_signatures;
+	const u64 signature = (static_cast<u64>(map) << 63) |
+		(static_cast<u64>(odd_page) << 62) |
+		(static_cast<u64>(index & 0xff) << 32) |
+		static_cast<u64>(vaddr);
+
+	if (!s_logged_signatures.insert(signature).second)
+		return;
+
+	DevCon.Warning("COP0: Skipping %s TLB page op for non-TLB-managed vaddr 0x%08X (index=%d, page=%u)",
+		map ? "map" : "unmap", vaddr, index, odd_page ? 1 : 0);
 }
 #endif
 
@@ -354,10 +380,20 @@ void MapTLB(const tlbs& t, int i)
 			const u32 vaddr = addr << 12;
 			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
+				const u32 vaddr = addr << 12;
+				if (!COP0_IsTLBManagedVaddr(vaddr))
+				{
 #ifdef PCSX2_DEVBUILD
-				COP0_LogTLBProtectedSegmentWarning(t, i, vaddr, true);
+					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, false);
 #endif
-				continue;
+					continue;
+				}
+
+				if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+				{ //match
+					memSetPageAddr(vaddr, t.PFN0() + ((addr - saddr) << 12));
+					Cpu->Clear(vaddr, 0x400);
+				}
 			}
 
 			const COP0TLBMatchResult lookup = COP0_TLBEntryMatchesVaddr(t, vaddr);
@@ -365,25 +401,20 @@ void MapTLB(const tlbs& t, int i)
 			const COP0TLBMatchResult probe = COP0_TLBMatchTuple(t, (vaddr & 0xffffe000) | t.EntryHi.ASID, vaddr, true);
 			if (probe.matched != lookup.matched)
 			{
-				DevCon.Warning(
-					"COP0: TLB probe/lookup mismatch during map (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, probe=%d, lookup=%d)",
-					vaddr, i, t.EntryHi.UL, t.PageMask.UL, probe.matched, lookup.matched);
-				pxAssertRel(probe.matched == lookup.matched);
-			}
-#endif
-			if (!lookup.matched)
-				continue;
-
-			const u32 page_span = t.Mask() + 1;
-			const bool use_odd_page = lookup.odd_page;
+				const u32 vaddr = addr << 12;
+				if (!COP0_IsTLBManagedVaddr(vaddr))
+				{
 #ifdef PCSX2_DEVBUILD
-			const bool expected_odd_page = (addr - saddr) >= page_span;
-			if (expected_odd_page != use_odd_page)
-			{
-				DevCon.Warning(
-					"COP0: TLB odd/even mismatch during map (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, expected_odd=%d, helper_odd=%d)",
-					vaddr, i, t.EntryHi.UL, t.PageMask.UL, expected_odd_page, use_odd_page);
-				pxAssertRel(expected_odd_page == use_odd_page);
+					COP0_LogSkippedTLBPageOpOnce(i, vaddr, true, true);
+#endif
+					continue;
+				}
+
+				if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+				{ //match
+					memSetPageAddr(vaddr, t.PFN1() + ((addr - saddr) << 12));
+					Cpu->Clear(vaddr, 0x400);
+				}
 			}
 #endif
 			const EntryLo_t& lo = use_odd_page ? t.EntryLo1 : t.EntryLo0;
@@ -427,20 +458,37 @@ void UnmapTLB(const tlbs& t, int i)
 			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
 #ifdef PCSX2_DEVBUILD
-				COP0_LogTLBProtectedSegmentWarning(t, i, vaddr, false);
+				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, false);
 #endif
 				continue;
 			}
 
-			const COP0TLBMatchResult lookup = COP0_TLBEntryMatchesVaddr(t, vaddr);
-#ifdef PCSX2_DEVBUILD
-			const COP0TLBMatchResult probe = COP0_TLBMatchTuple(t, (vaddr & 0xffffe000) | t.EntryHi.ASID, vaddr, true);
-			if (probe.matched != lookup.matched)
+			if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+			{ //match
+				memClearPageAddr(vaddr);
+				Cpu->Clear(vaddr, 0x400);
+			}
+
+	if (t.EntryLo1.V)
+	{
+		saddr = (t.VPN2() >> 12) + t.Mask() + 1;
+		eaddr = saddr + t.Mask() + 1;
+		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
+		for (addr = saddr; addr < eaddr; addr++)
+		{
+			const u32 vaddr = addr << 12;
+			if (!COP0_IsTLBManagedVaddr(vaddr))
 			{
-				DevCon.Warning(
-					"COP0: TLB probe/lookup mismatch during unmap (vaddr=0x%08X, index=%d, EntryHi=0x%08X, PageMask=0x%08X, probe=%d, lookup=%d)",
-					vaddr, i, t.EntryHi.UL, t.PageMask.UL, probe.matched, lookup.matched);
-				pxAssertRel(probe.matched == lookup.matched);
+#ifdef PCSX2_DEVBUILD
+				COP0_LogSkippedTLBPageOpOnce(i, vaddr, false, true);
+#endif
+				continue;
+			}
+
+			if (COP0_TLBEntryMatchesVaddr(t, vaddr))
+			{ //match
+				memClearPageAddr(vaddr);
+				Cpu->Clear(vaddr, 0x400);
 			}
 #endif
 			if (!lookup.matched)
