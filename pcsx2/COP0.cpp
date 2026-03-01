@@ -5,6 +5,12 @@
 #include "COP0.h"
 
 static constexpr bool TLB_TRACE_LOG = true;
+static bool s_full_tlb_mode = false;
+
+void ResetFullTLBMode()
+{
+	s_full_tlb_mode = false;
+}
 
 #define TLBTrace(...) \
 	do \
@@ -326,6 +332,14 @@ static bool IsDirectMappedKernelSegment(u32 vaddr)
 static void RebuildTLBContext()
 {
 	const u8 asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
+
+	if (!s_full_tlb_mode)
+	{
+		TLBTrace("[TLB] enabling full-TLB virtual mode");
+		vtlb_VMapUnmap(0x00000000, 0x80000000);
+		memMapKernelMem();
+		s_full_tlb_mode = true;
+	}
 	TLBTrace("[TLB] RebuildTLBContext ASID=%02x", asid);
 
 	for (int i = 0; i < 48; i++)
@@ -624,7 +638,7 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 			{
 				const u8 old_asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF);
 				cpuRegs.CP0.n.EntryHi = cpuRegs.GPR.r[_Rt_].UL[0];
-				if (static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF) != old_asid)
+				if (!s_full_tlb_mode || static_cast<u8>(cpuRegs.CP0.n.EntryHi & 0xFF) != old_asid)
 					RebuildTLBContext();
 				break;
 			}
