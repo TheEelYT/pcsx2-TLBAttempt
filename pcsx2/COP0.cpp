@@ -49,6 +49,35 @@ static __fi u32 COP0_SanitizeRandomForWired(u32 random, u32 wired)
 	return rand_index;
 }
 
+static __fi u32 COP0_GetEntryHiVPN2(u32 entry_hi)
+{
+	// EE EntryHi uses VPN2[31:13], ASID[7:0], with bits [12:8] treated as region/ignored in TLB matching.
+	return (entry_hi >> 13) & 0x7ffff;
+}
+
+static __fi u32 COP0_GetTLBCompareMask(const tlbs& entry)
+{
+	// PageMask bits select VPN2 bits to ignore during probe/lookup.
+	return (~entry.Mask()) & 0x7ffff;
+}
+
+static __fi bool COP0_TLBEntryMatches(const tlbs& entry, u32 entry_hi, bool check_asid = true)
+{
+	if ((entry.EntryHi.VPN2 & COP0_GetTLBCompareMask(entry)) != (COP0_GetEntryHiVPN2(entry_hi) & COP0_GetTLBCompareMask(entry)))
+		return false;
+
+	if (!check_asid || entry.isGlobal())
+		return true;
+
+	return entry.EntryHi.ASID == static_cast<u8>(entry_hi);
+}
+
+static __fi bool COP0_TLBEntryMatchesVaddr(const tlbs& entry, u32 vaddr)
+{
+	const u32 entry_hi = (vaddr & 0xffffe000) | entry.EntryHi.ASID;
+	return COP0_TLBEntryMatches(entry, entry_hi, false);
+}
+
 void COP0_SetWired(u32 value)
 {
 	cpuRegs.CP0.n.Wired = value & 0x3f;
@@ -272,7 +301,7 @@ __fi void COP0_UpdatePCCR()
 
 void MapTLB(const tlbs& t, int i)
 {
-	u32 mask, addr;
+	u32 addr;
 	u32 saddr, eaddr;
 
 	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
@@ -294,13 +323,12 @@ void MapTLB(const tlbs& t, int i)
 	{
 		if (t.EntryLo0.V)
 		{
-			mask = ((~t.Mask()) << 1) & 0xfffff;
 			saddr = t.VPN2() >> 12;
 			eaddr = saddr + t.Mask() + 1;
 
 			for (addr = saddr; addr < eaddr; addr++)
 			{
-				if ((addr & mask) == ((t.VPN2() >> 12) & mask))
+				if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
 				{ //match
 					memSetPageAddr(addr << 12, t.PFN0() + ((addr - saddr) << 12));
 					Cpu->Clear(addr << 12, 0x400);
@@ -310,13 +338,12 @@ void MapTLB(const tlbs& t, int i)
 
 		if (t.EntryLo1.V)
 		{
-			mask = ((~t.Mask()) << 1) & 0xfffff;
 			saddr = (t.VPN2() >> 12) + t.Mask() + 1;
 			eaddr = saddr + t.Mask() + 1;
 
 			for (addr = saddr; addr < eaddr; addr++)
 			{
-				if ((addr & mask) == ((t.VPN2() >> 12) & mask))
+				if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
 				{ //match
 					memSetPageAddr(addr << 12, t.PFN1() + ((addr - saddr) << 12));
 					Cpu->Clear(addr << 12, 0x400);
@@ -338,7 +365,7 @@ __inline u32 ConvertPageMask(const u32 PageMask)
 void UnmapTLB(const tlbs& t, int i)
 {
 	//Console.WriteLn("Clear TLB %d: %08x-> [%08x %08x] S=%d G=%d ASID=%d Mask= %03X", i,t.VPN2,t.PFN0,t.PFN1,t.S,t.G,t.ASID,t.Mask);
-	u32 mask, addr;
+	u32 addr;
 	u32 saddr, eaddr;
 
 	if (t.isSPR())
@@ -349,13 +376,12 @@ void UnmapTLB(const tlbs& t, int i)
 
 	if (t.EntryLo0.V)
 	{
-		mask = ((~t.Mask()) << 1) & 0xfffff;
 		saddr = t.VPN2() >> 12;
 		eaddr = saddr + t.Mask() + 1;
 		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
 		for (addr = saddr; addr < eaddr; addr++)
 		{
-			if ((addr & mask) == ((t.VPN2() >> 12) & mask))
+			if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
 			{ //match
 				memClearPageAddr(addr << 12);
 				Cpu->Clear(addr << 12, 0x400);
@@ -365,13 +391,12 @@ void UnmapTLB(const tlbs& t, int i)
 
 	if (t.EntryLo1.V)
 	{
-		mask = ((~t.Mask()) << 1) & 0xfffff;
 		saddr = (t.VPN2() >> 12) + t.Mask() + 1;
 		eaddr = saddr + t.Mask() + 1;
 		//	Console.WriteLn("Clear TLB: %08x ~ %08x",saddr,eaddr-1);
 		for (addr = saddr; addr < eaddr; addr++)
 		{
-			if ((addr & mask) == ((t.VPN2() >> 12) & mask))
+			if (COP0_TLBEntryMatchesVaddr(t, addr << 12))
 			{ //match
 				memClearPageAddr(addr << 12);
 				Cpu->Clear(addr << 12, 0x400);
@@ -503,33 +528,15 @@ namespace COP0 {
 
 	void TLBP()
 	{
-		int i;
-
-		union
+		cpuRegs.CP0.n.Index = 0x80000000;
+		for (u32 i = 0; i < 48; i++)
 		{
-			struct
-			{
-				u32 VPN2 : 19;
-				u32 VPN2X : 2;
-				u32 G : 3;
-				u32 ASID : 8;
-			} s;
-			u32 u;
-		} EntryHi32;
-
-		EntryHi32.u = cpuRegs.CP0.n.EntryHi;
-
-		cpuRegs.CP0.n.Index = 0xFFFFFFFF;
-		for (i = 0; i < 48; i++)
-		{
-			if (tlb[i].VPN2() == ((~tlb[i].Mask()) & (EntryHi32.s.VPN2)) && ((tlb[i].isGlobal()) || ((tlb[i].EntryHi.ASID & 0xff) == EntryHi32.s.ASID)))
+			if (COP0_TLBEntryMatches(tlb[i], cpuRegs.CP0.n.EntryHi))
 			{
 				cpuRegs.CP0.n.Index = i;
 				break;
 			}
 		}
-		if (cpuRegs.CP0.n.Index == 0xFFFFFFFF)
-			cpuRegs.CP0.n.Index = 0x80000000;
 	}
 
 	void MFC0()
