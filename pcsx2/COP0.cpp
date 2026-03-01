@@ -107,11 +107,6 @@ static void COP0_LogTLBProtectedSegmentWarning(const tlbs& t, int index, u32 vad
 }
 #endif
 
-static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
-{
-	return (vaddr & 0x80000000) == 0;
-}
-
 #ifdef PCSX2_DEVBUILD
 static void COP0_LogSkippedTLBPageOpOnce(int index, u32 vaddr, bool map, bool odd_page)
 {
