@@ -1197,13 +1197,14 @@ void memReset()
 
 	memMapPhy();
 	memMapVUmicro();
-	memMapKernelMem();
 	memMapSupervisorMem();
 	memMapUserMem();
 	memSetKernelMode();
 
-	vtlb_VMap(0x00000000,0x00000000,0x20000000);
-	vtlb_VMapUnmap(0x20000000,0x60000000);
+	// Start with a direct-mapped lower segment for early boot/exception stubs.
+	// Full-TLB mode is enabled once the guest actually writes TLB entries.
+	vtlb_VMap(0x00000000, 0x00000000, 0x20000000);
+	vtlb_VMapUnmap(0x20000000, 0x60000000);
 
 	std::memset(s_ba, 0, sizeof(s_ba));
 
