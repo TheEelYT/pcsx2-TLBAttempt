@@ -50,7 +50,14 @@ u32 g_eeloadMain = 0, g_eeloadExec = 0, g_osdsys_str = 0;
 
 bool IsValidVTLBRefillHandlerAddress(u32 addr)
 {
-	return ((addr & 0x3) == 0) && (addr >= 0x80000000 && addr < 0x82000000);
+	if ((addr & 0x3) != 0)
+		return false;
+
+	const u32 segment = addr & 0xE0000000;
+	if (segment != 0x80000000 && segment != 0xA0000000)
+		return false;
+
+	return (addr & 0x1FFFFFFF) < 0x02000000;
 }
 
 void SetVTLBRefillHandlerAddress(u32 addr)
@@ -64,11 +71,11 @@ void SetVTLBRefillHandlerAddress(u32 addr)
 	if (!IsValidVTLBRefillHandlerAddress(addr))
 	{
 		DevCon.Warning("Ignoring invalid SetVTLBRefillHandler address 0x%08x", addr);
-		cpuRegs.vtlbRefillHandler = 0;
 		return;
 	}
 
-	cpuRegs.vtlbRefillHandler = addr;
+	// Canonicalize kernel segment aliases to kseg0 so CPU exception flow always uses the same executable mapping.
+	cpuRegs.vtlbRefillHandler = (addr & 0x1FFFFFFF) | 0x80000000;
 }
 
 static u32 GetExceptionVectorAddress(u32 offset, bool check_status)
