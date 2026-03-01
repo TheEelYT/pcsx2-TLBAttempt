@@ -47,6 +47,29 @@ EE_intProcessStatus eeRunInterruptScan = INT_NOT_RUNNING;
 
 u32 g_eeloadMain = 0, g_eeloadExec = 0, g_osdsys_str = 0;
 
+bool IsValidVTLBRefillHandlerAddress(u32 addr)
+{
+	return ((addr & 0x3) == 0) && (addr >= 0x80000000 && addr < 0x82000000);
+}
+
+void SetVTLBRefillHandlerAddress(u32 addr)
+{
+	if (addr == 0)
+	{
+		cpuRegs.vtlbRefillHandler = 0;
+		return;
+	}
+
+	if (!IsValidVTLBRefillHandlerAddress(addr))
+	{
+		DevCon.Warning("Ignoring invalid SetVTLBRefillHandler address 0x%08x", addr);
+		cpuRegs.vtlbRefillHandler = 0;
+		return;
+	}
+
+	cpuRegs.vtlbRefillHandler = addr;
+}
+
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
 but in fast boot mode, the block we use can fit at least 16 argv pointers (varies with BIOS version).
 The second EELOAD call during full boot has three built-in arguments ("EELOAD rom0:PS2LOGO <ELF>"),
@@ -62,6 +85,7 @@ void cpuReset()
 	std::memset(&fpuRegs, 0, sizeof(fpuRegs));
 	std::memset(&tlb, 0, sizeof(tlb));
 	cachedTlbs.count = 0;
+	cpuRegs.vtlbRefillHandler = 0;
 
 	cpuRegs.pc				= 0xbfc00000; //set pc reg to stack
 	cpuRegs.CP0.n.Config	= 0x440;
@@ -156,7 +180,9 @@ __ri void cpuException(u32 code, u32 bd)
 		if (errLevel2) Console.Warning("cpuException: Status.EXL = 1 cause %x", code);
 	}
 
-	if (checkStatus)
+	if ((offset == 0x0) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vtlbRefillHandler))
+		cpuRegs.pc = cpuRegs.vtlbRefillHandler;
+	else if (checkStatus)
 		cpuRegs.pc = 0x80000000 + offset;
 	else
 		cpuRegs.pc = 0xBFC00200 + offset;

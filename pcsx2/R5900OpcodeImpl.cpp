@@ -1060,7 +1060,11 @@ void SYSCALL()
 			}
 			break;
 		case Syscall::SetVTLBRefillHandler:
-			DevCon.Warning("A tlb refill handler is set. New handler %x", (u32*)PSM(cpuRegs.GPR.n.a1.UL[0]));
+		{
+			const u32 handler = cpuRegs.GPR.n.a1.UL[0];
+			SetVTLBRefillHandlerAddress(handler);
+			BIOS_LOG("SetVTLBRefillHandler(handler=0x%08x)", handler);
+		}
 			break;
 		case Syscall::StartThread:
 		case Syscall::ChangeThreadPriority:
