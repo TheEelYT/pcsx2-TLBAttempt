@@ -2840,11 +2840,17 @@ bool VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
 	std::string failure_reason;
 
 	const bool load_ok = UpdateELFInfo(std::move(elf_path), &failure_reason);
+	const bool is_non_fatal_empty_bios_elf =
+		(!load_ok && requested_elf_path.empty() && was_running_bios);
 	Console.WriteLn(Color_StrongBlue, fmt::format("ELF Loading: {}, Game CRC = {:08X}, EntryPoint = 0x{:08X}",
 									  s_elf_path, s_current_crc, s_elf_entry_point));
 	s_elf_executed = false;
 
-	if (!load_ok)
+	if (is_non_fatal_empty_bios_elf)
+	{
+		Console.Warning("Ignoring empty ELF path while running BIOS startup flow; continuing BIOS execution.");
+	}
+	else if (!load_ok)
 	{
 		Console.Error(fmt::format("Aborting ELF launch path for '{}': {}", requested_elf_path,
 			failure_reason.empty() ? "unknown ELF load failure" : failure_reason));
