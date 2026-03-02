@@ -1184,9 +1184,13 @@ VMManager::ELFLoadStatus VMManager::UpdateELFInfo(std::string elf_path, std::str
 	ElfObject elfo;
 	if (!cdvdLoadElf(&elfo, elf_path, false, &error))
 	{
+		std::string load_failure_reason = error.GetDescription();
+		if (load_failure_reason.empty() && !elf_path.empty())
+			load_failure_reason = "unsupported device/path for cdvdLoadElf";
+
 		if (failure_reason)
-			*failure_reason = error.GetDescription();
-		Console.Error(fmt::format("Failed to read ELF being loaded: {}: {}", elf_path, error.GetDescription()));
+			*failure_reason = load_failure_reason;
+		Console.Error(fmt::format("Failed to read ELF being loaded: {}: {}", elf_path, load_failure_reason));
 
 		s_elf_path = {};
 		s_elf_text_range = {};
