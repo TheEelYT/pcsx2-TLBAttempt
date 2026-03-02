@@ -2203,7 +2203,7 @@ static void recRecompile(const u32 startpc)
 
 	if (startpc == 0)
 	{
-		recAbortRecompileCorruption("invalid zero startpc", startpc, false);
+		recAbortRecompileCorruption("invalid zero startpc", startpc, true);
 		return;
 	}
 
