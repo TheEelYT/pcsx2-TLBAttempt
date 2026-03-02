@@ -2407,8 +2407,43 @@ static __fi void cdvdWrite14(u8 rt)
 		Console.Warning("*PCSX2*: Unimplemented PS1 mode DISC SPEED = STANDARD");
 }
 
-static __fi void fail_pol_cal()
+static bool s_pol_cal_diag_logged = false;
+
+static void log_mg_window(const char* tag, int center, int radius)
 {
+	const int buf_size = static_cast<int>(sizeof(cdvd.mg_buffer));
+	if (center < 0 || center >= buf_size)
+	{
+		Console.Error("[MG][pol_cal][diag] {}: center={} out of range (buf={})", tag, center, buf_size);
+		return;
+	}
+
+	const int start = std::max(0, center - radius);
+	const int end = std::min(buf_size - 1, center + radius);
+
+	std::string dump;
+	for (int i = start; i <= end; i++)
+	{
+		if (!dump.empty())
+			dump += ' ';
+		dump += StringUtil::StdStringFromFormat("%02X", cdvd.mg_buffer[i]);
+	}
+
+	Console.Error("[MG][pol_cal][diag] {} [0x{:X}..0x{:X}] {}", tag, start, end, dump);
+}
+
+static __fi void fail_pol_cal(const char* reason, int bit_ofs = -1)
+{
+	if (!s_pol_cal_diag_logged)
+	{
+		s_pol_cal_diag_logged = true;
+		Console.Error("[MG][pol_cal][diag] reason={} mg_datatype={} mg_size={} mg_maxsize={} s_cmd=0x{:02X}",
+			reason, cdvd.mg_datatype, cdvd.mg_size, cdvd.mg_maxsize, cdvd.sCommand);
+		log_mg_window("hdr@0x14", 0x14, 0x10);
+		if (bit_ofs >= 0)
+			log_mg_window("bit_ofs", bit_ofs, 0x10);
+	}
+
 	Console.Error("[MG] ERROR - Make sure the file is already decrypted!!!");
 	cdvd.SCMDResultBuff[0] = 0x80;
 }
@@ -2924,13 +2959,14 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 			case 0x88: // secrman: __mechacon_auth_0x88	//for now it is the same; so, fall;)
 			case 0x8F: // secrman: __mechacon_auth_0x8F
 				SetSCMDResultSize(1); //in:0
+				s_pol_cal_diag_logged = false;
 				if (cdvd.mg_datatype == 1) // header data
 				{
 					int bit_ofs = 0;
 
 					if ((cdvd.mg_maxsize != cdvd.mg_size) || (cdvd.mg_size < 0x20) || (cdvd.mg_size != GetBufferU16(&cdvd.mg_buffer[0], 0x14)))
 					{
-						fail_pol_cal();
+						fail_pol_cal("hdr_size_guard(mg_maxsize==mg_size && mg_size>=0x20 && mg_size==hdr_size)");
 						break;
 					}
 
@@ -2952,7 +2988,7 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 
 					if (bit_ofs < 0x20 || (size_t)bit_ofs > buf_size)
 					{
-						fail_pol_cal();
+						fail_pol_cal("bit_offset_guard(0x20<=bit_ofs<=mg_buffer_size)", bit_ofs);
 						break;
 					}
 
@@ -2965,7 +3001,7 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 					if ((cdvd.mg_buffer[bit_ofs + 5] || cdvd.mg_buffer[bit_ofs + 6] || cdvd.mg_buffer[bit_ofs + 7]) ||
 						(GetBufferU16(&cdvd.mg_buffer[0],bit_ofs + 4) * 16 + bit_ofs + 8 + 16 != GetBufferU16(&cdvd.mg_buffer[0], 0x14)))
 					{
-						fail_pol_cal();
+						fail_pol_cal("bit_block_guard(zero_pad && computed_len==hdr_size)", bit_ofs);
 						break;
 					}
 				}
@@ -2986,10 +3022,11 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 			{
 				SetSCMDResultSize(3); //in:0
 				const int bit_ofs = mg_BIToffset(&cdvd.mg_buffer[0]);
+				s_pol_cal_diag_logged = false;
 
 				if (bit_ofs < 0)
 				{
-					fail_pol_cal();
+					fail_pol_cal("bit_offset_guard(bit_ofs>=0)", bit_ofs);
 					break;
 				}
 
@@ -2998,7 +3035,7 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 
 				if (ofs > bufsize - 5) // Make sure we can read the block count
 				{
-					fail_pol_cal();
+					fail_pol_cal("bit_offset_guard(ofs<=bufsize-5)", bit_ofs);
 					break;
 				}
 				const unsigned int blocks = static_cast<unsigned int>(cdvd.mg_buffer[ofs + 4]);
@@ -3006,7 +3043,7 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 
 				if (copy_len > bufsize - ofs) // Make sure we can read the blocks
 				{
-					fail_pol_cal();
+					fail_pol_cal("bit_block_guard(copy_len<=bufsize-ofs)", bit_ofs);
 					break;
 				}
 
