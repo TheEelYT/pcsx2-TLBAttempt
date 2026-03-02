@@ -2174,7 +2174,7 @@ static bool recSkipTimeoutLoop(s32 reg, bool is_timeout_loop)
 	return true;
 }
 
-static bool recAbortRecompileCorruption(const char* reason, const u32 startpc)
+static bool recAbortRecompileCorruption(const char* reason, const u32 startpc, const bool pause_and_exit = true)
 {
 	Console.Error("[EE] recRecompile corruption detected (%s). startpc=0x%08X", reason, startpc);
 	Console.Error("[EE] CPU state: pc=0x%08X EPC=0x%08X ErrorEPC=0x%08X Status=0x%08X Cause=0x%08X BadVAddr=0x%08X EntryHi=0x%08X",
@@ -2183,6 +2183,13 @@ static bool recAbortRecompileCorruption(const char* reason, const u32 startpc)
 
 	if (BASEBLOCK* const block = PC_GETBLOCK(startpc))
 		block->SetFnptr((uptr)DispatcherReg);
+
+	eeRecNeedsReset = true;
+	s_pCurBlock = nullptr;
+	s_pCurBlockEx = nullptr;
+
+	if (!pause_and_exit)
+		return false;
 
 	VMManager::SetPaused(true);
 	Cpu->ExitExecution();
@@ -2193,6 +2200,12 @@ static void recRecompile(const u32 startpc)
 {
 	u32 i = 0;
 	u32 willbranch3 = 0;
+
+	if (startpc == 0)
+	{
+		recAbortRecompileCorruption("invalid zero startpc", startpc, false);
+		return;
+	}
 
 	pxAssert(startpc);
 
