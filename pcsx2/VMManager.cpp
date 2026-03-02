@@ -106,7 +106,7 @@ namespace VMManager
 	static void UpdateDiscDetails(bool booting);
 	static void ClearDiscDetails();
 	static void HandleELFChange(bool verbose_patches_if_changed);
-	static void UpdateELFInfo(std::string elf_path);
+	static bool UpdateELFInfo(std::string elf_path, std::string* failure_reason = nullptr);
 	static void ClearELFInfo();
 	static void ReportGameChangeToHost();
 	static bool HasBootedELF();
@@ -1151,29 +1151,59 @@ void VMManager::HandleELFChange(bool verbose_patches_if_changed)
 	ApplyCoreSettings();
 }
 
-void VMManager::UpdateELFInfo(std::string elf_path)
+static constexpr u32 INVALID_ELF_ENTRY_POINT = 0xFFFFFFFFu;
+
+static bool IsInvalidELFEntryPoint(const u32 entry_point)
+{
+	return (entry_point == 0 || entry_point == INVALID_ELF_ENTRY_POINT);
+}
+
+bool VMManager::UpdateELFInfo(std::string elf_path, std::string* failure_reason)
 {
 	Error error;
 	ElfObject elfo;
 	if (elf_path.empty() || !cdvdLoadElf(&elfo, elf_path, false, &error))
 	{
 		if (!elf_path.empty())
+		{
+			if (failure_reason)
+				*failure_reason = error.GetDescription();
 			Console.Error(fmt::format("Failed to read ELF being loaded: {}: {}", elf_path, error.GetDescription()));
+		}
+		else if (failure_reason)
+		{
+			*failure_reason = "empty ELF path";
+		}
 
 		s_elf_path = {};
 		s_elf_text_range = {};
-		s_elf_entry_point = 0xFFFFFFFFu;
+		s_elf_entry_point = INVALID_ELF_ENTRY_POINT;
 		s_current_crc = 0;
-		return;
+		return false;
 	}
 
 	elfo.LoadHeaders();
 	s_current_crc = elfo.GetCRC();
 	s_elf_entry_point = elfo.GetEntryPoint();
+	if (IsInvalidELFEntryPoint(s_elf_entry_point))
+	{
+		if (failure_reason)
+			*failure_reason = fmt::format("invalid entry point 0x{:08X}", s_elf_entry_point);
+
+		Console.Error(fmt::format("Rejected ELF '{}' due to invalid entry point 0x{:08X}", elf_path, s_elf_entry_point));
+
+		s_elf_path = {};
+		s_elf_text_range = {};
+		s_elf_entry_point = INVALID_ELF_ENTRY_POINT;
+		s_current_crc = 0;
+		return false;
+	}
+
 	s_elf_text_range = elfo.GetTextRange();
 	s_elf_path = std::move(elf_path);
 
 	R5900SymbolImporter.OnElfChanged(elfo.ReleaseData(), s_elf_path);
+	return true;
 }
 
 void VMManager::ClearELFInfo()
@@ -1182,7 +1212,7 @@ void VMManager::ClearELFInfo()
 	s_elf_executed = false;
 	s_elf_text_range = {};
 	s_elf_path = {};
-	s_elf_entry_point = 0xFFFFFFFFu;
+	s_elf_entry_point = INVALID_ELF_ENTRY_POINT;
 }
 
 void VMManager::ReportGameChangeToHost()
@@ -2803,14 +2833,25 @@ bool VMManager::Internal::IsExecutionInterrupted()
 	return s_state.load(std::memory_order_relaxed) != VMState::Running || s_cpu_implementation_changed;
 }
 
-void VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
+bool VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
 {
 	const bool was_running_bios = (s_current_crc == 0);
+	const std::string requested_elf_path = elf_path;
+	std::string failure_reason;
 
-	UpdateELFInfo(std::move(elf_path));
+	const bool load_ok = UpdateELFInfo(std::move(elf_path), &failure_reason);
 	Console.WriteLn(Color_StrongBlue, fmt::format("ELF Loading: {}, Game CRC = {:08X}, EntryPoint = 0x{:08X}",
-										  s_elf_path, s_current_crc, s_elf_entry_point));
+									  s_elf_path, s_current_crc, s_elf_entry_point));
 	s_elf_executed = false;
+
+	if (!load_ok)
+	{
+		Console.Error(fmt::format("Aborting ELF launch path for '{}': {}", requested_elf_path,
+			failure_reason.empty() ? "unknown ELF load failure" : failure_reason));
+		SetState(VMState::Paused);
+		Cpu->ExitExecution();
+		return false;
+	}
 
 	// Remove patches, if we're changing games, we don't want to be applying the patch for the old game while it's loading.
 	if (!was_running_bios)
@@ -2818,6 +2859,8 @@ void VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
 		Patch::ReloadPatches(s_disc_serial, 0, false, false, false, true);
 		ApplyCoreSettings();
 	}
+
+	return true;
 }
 
 void VMManager::Internal::EntryPointCompilingOnCPUThread()

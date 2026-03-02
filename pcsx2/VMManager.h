@@ -326,7 +326,7 @@ namespace VMManager
 
 		const std::string& GetELFOverride();
 		bool IsExecutionInterrupted();
-		void ELFLoadingOnCPUThread(std::string elf_path);
+		bool ELFLoadingOnCPUThread(std::string elf_path);
 		void EntryPointCompilingOnCPUThread();
 		void VSyncOnCPUThread();
 		void PollInputOnCPUThread();
