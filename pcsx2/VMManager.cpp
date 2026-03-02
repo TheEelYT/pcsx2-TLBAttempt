@@ -106,7 +106,13 @@ namespace VMManager
 	static void UpdateDiscDetails(bool booting);
 	static void ClearDiscDetails();
 	static void HandleELFChange(bool verbose_patches_if_changed);
-	static bool UpdateELFInfo(std::string elf_path, std::string* failure_reason = nullptr);
+	enum class ELFLoadStatus
+	{
+		Success,
+		NoELFPath,
+		Error,
+	};
+	static ELFLoadStatus UpdateELFInfo(std::string elf_path, std::string* failure_reason = nullptr);
 	static void ClearELFInfo();
 	static void ReportGameChangeToHost();
 	static bool HasBootedELF();
@@ -1158,28 +1164,35 @@ static bool IsInvalidELFEntryPoint(const u32 entry_point)
 	return (entry_point == 0 || entry_point == INVALID_ELF_ENTRY_POINT);
 }
 
-bool VMManager::UpdateELFInfo(std::string elf_path, std::string* failure_reason)
+VMManager::ELFLoadStatus VMManager::UpdateELFInfo(std::string elf_path, std::string* failure_reason)
 {
+	if (failure_reason)
+		failure_reason->clear();
+
+	if (elf_path.empty())
+	{
+		s_elf_path = {};
+		s_elf_text_range = {};
+		s_elf_entry_point = INVALID_ELF_ENTRY_POINT;
+		s_current_crc = 0;
+		if (failure_reason)
+			*failure_reason = "empty ELF path";
+		return ELFLoadStatus::NoELFPath;
+	}
+
 	Error error;
 	ElfObject elfo;
-	if (elf_path.empty() || !cdvdLoadElf(&elfo, elf_path, false, &error))
+	if (!cdvdLoadElf(&elfo, elf_path, false, &error))
 	{
-		if (!elf_path.empty())
-		{
-			if (failure_reason)
-				*failure_reason = error.GetDescription();
-			Console.Error(fmt::format("Failed to read ELF being loaded: {}: {}", elf_path, error.GetDescription()));
-		}
-		else if (failure_reason)
-		{
-			*failure_reason = "empty ELF path";
-		}
+		if (failure_reason)
+			*failure_reason = error.GetDescription();
+		Console.Error(fmt::format("Failed to read ELF being loaded: {}: {}", elf_path, error.GetDescription()));
 
 		s_elf_path = {};
 		s_elf_text_range = {};
 		s_elf_entry_point = INVALID_ELF_ENTRY_POINT;
 		s_current_crc = 0;
-		return false;
+		return ELFLoadStatus::Error;
 	}
 
 	elfo.LoadHeaders();
@@ -1196,14 +1209,14 @@ bool VMManager::UpdateELFInfo(std::string elf_path, std::string* failure_reason)
 		s_elf_text_range = {};
 		s_elf_entry_point = INVALID_ELF_ENTRY_POINT;
 		s_current_crc = 0;
-		return false;
+		return ELFLoadStatus::Error;
 	}
 
 	s_elf_text_range = elfo.GetTextRange();
 	s_elf_path = std::move(elf_path);
 
 	R5900SymbolImporter.OnElfChanged(elfo.ReleaseData(), s_elf_path);
-	return true;
+	return ELFLoadStatus::Success;
 }
 
 void VMManager::ClearELFInfo()
@@ -2839,18 +2852,19 @@ bool VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
 	const std::string requested_elf_path = elf_path;
 	std::string failure_reason;
 
-	const bool load_ok = UpdateELFInfo(std::move(elf_path), &failure_reason);
-	const bool is_non_fatal_empty_bios_elf =
-		(!load_ok && requested_elf_path.empty() && was_running_bios);
+	const ELFLoadStatus load_status = UpdateELFInfo(std::move(elf_path), &failure_reason);
 	Console.WriteLn(Color_StrongBlue, fmt::format("ELF Loading: {}, Game CRC = {:08X}, EntryPoint = 0x{:08X}",
-									  s_elf_path, s_current_crc, s_elf_entry_point));
+								  s_elf_path, s_current_crc, s_elf_entry_point));
 	s_elf_executed = false;
 
-	if (is_non_fatal_empty_bios_elf)
+	if (load_status == ELFLoadStatus::NoELFPath)
 	{
-		Console.Warning("Ignoring empty ELF path while running BIOS startup flow; continuing BIOS execution.");
+		if (was_running_bios)
+			Console.Warning("Ignoring empty ELF path while running BIOS startup flow; continuing BIOS execution.");
+		else
+			Console.Warning("No ELF path provided; continuing execution.");
 	}
-	else if (!load_ok)
+	else if (load_status == ELFLoadStatus::Error)
 	{
 		Console.Error(fmt::format("Aborting ELF launch path for '{}': {}", requested_elf_path,
 			failure_reason.empty() ? "unknown ELF load failure" : failure_reason));
