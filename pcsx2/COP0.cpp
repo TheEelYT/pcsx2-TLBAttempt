@@ -4,9 +4,7 @@
 #include "Common.h"
 #include "COP0.h"
 
-#ifdef PCSX2_DEVBUILD
 #include <unordered_set>
-#endif
 
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
@@ -109,6 +107,54 @@ static __fi bool COP0_TLBMappingCouldCoverVirtualPageZero(const tlbs& t)
 	return even_valid;
 }
 
+static __fi bool COP0_IsExpectedKernelBootZeroMapping(const tlbs& t)
+{
+	if (!t.isGlobal() || t.EntryHi.ASID != 0)
+		return false;
+
+	// Common boot-time kernel mappings for VPN2==0 are global and use larger page sizes.
+	const u32 canonical_page_mask = t.PageMask.UL & 0x01ffe000;
+	return (canonical_page_mask >= 0x00006000 && canonical_page_mask <= 0x01ffe000);
+}
+
+struct COP0TLBPageZeroWarnSignature
+{
+	u32 index;
+	u32 entry_hi;
+	u32 page_mask;
+	u32 entry_lo0;
+	u32 entry_lo1;
+
+	bool operator==(const COP0TLBPageZeroWarnSignature& other) const = default;
+};
+
+struct COP0TLBPageZeroWarnSignatureHash
+{
+	std::size_t operator()(const COP0TLBPageZeroWarnSignature& value) const
+	{
+		std::size_t hash = static_cast<std::size_t>(value.index);
+		hash = (hash * 16777619u) ^ static_cast<std::size_t>(value.entry_hi);
+		hash = (hash * 16777619u) ^ static_cast<std::size_t>(value.page_mask);
+		hash = (hash * 16777619u) ^ static_cast<std::size_t>(value.entry_lo0);
+		hash = (hash * 16777619u) ^ static_cast<std::size_t>(value.entry_lo1);
+		return hash;
+	}
+};
+
+static __fi bool COP0_ShouldWarnAboutVirtualPageZeroMapping(const tlbs& t)
+{
+	if (!COP0_TLBMappingCouldCoverVirtualPageZero(t))
+		return false;
+
+	const bool kernel_context = t.isGlobal() && t.EntryHi.ASID == 0;
+	const bool unexpected_asid_global_combo = (t.isGlobal() && t.EntryHi.ASID != 0) || (!t.isGlobal() && t.EntryHi.ASID == 0);
+
+	if (kernel_context && COP0_IsExpectedKernelBootZeroMapping(t))
+		return false;
+
+	return !kernel_context || unexpected_asid_global_combo || !COP0_IsExpectedKernelBootZeroMapping(t);
+}
+
 static void COP0_LogTLBWriteDiagnostics(const char* op, const tlbs& t, int index)
 {
 	if (TraceLogging.EE.Bios.IsActive())
@@ -118,13 +164,24 @@ static void COP0_LogTLBWriteDiagnostics(const char* op, const tlbs& t, int index
 			op, index, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL, t.PageMask.UL);
 	}
 
-	static bool s_logged_page_zero_warning = false;
-	if (!s_logged_page_zero_warning && COP0_TLBMappingCouldCoverVirtualPageZero(t))
+	static std::unordered_set<COP0TLBPageZeroWarnSignature, COP0TLBPageZeroWarnSignatureHash> s_logged_page_zero_warnings;
+	if (COP0_ShouldWarnAboutVirtualPageZeroMapping(t))
 	{
-		s_logged_page_zero_warning = true;
+		const COP0TLBPageZeroWarnSignature signature = {
+			static_cast<u32>(index),
+			t.EntryHi.UL,
+			t.PageMask.UL,
+			t.EntryLo0.UL,
+			t.EntryLo1.UL,
+		};
+
+		if (!s_logged_page_zero_warnings.insert(signature).second)
+			return;
+
+		const bool global = t.isGlobal();
 		DevCon.Warning(
-			"COP0 one-shot warning: %s produced TLB mapping covering virtual page zero (index=%d, EntryHi=0x%08x, EntryLo0=0x%08x, EntryLo1=0x%08x, PageMask=0x%08x)",
-			op, index, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL, t.PageMask.UL);
+			"COP0 heuristic warning: %s produced suspicious TLB mapping that may cover virtual page zero (index=%d, global=%d, asid=0x%02x, EntryHi=0x%08x, EntryLo0=0x%08x, EntryLo1=0x%08x, PageMask=0x%08x)",
+			op, index, global ? 1 : 0, t.EntryHi.ASID, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL, t.PageMask.UL);
 	}
 }
 
