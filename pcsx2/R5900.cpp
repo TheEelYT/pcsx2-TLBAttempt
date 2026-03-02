@@ -178,6 +178,42 @@ static bool ShouldLogExceptionDiagnostics(const ExceptionLogRateLimitKey& key)
 	return true;
 }
 
+struct ExceptionPcWriteRateLimitKey
+{
+	u32 destination_pc;
+	u32 cause;
+	u32 epc;
+
+	bool operator==(const ExceptionPcWriteRateLimitKey& rhs) const = default;
+};
+
+static bool ShouldLogExceptionPcWriteDiagnostics(const ExceptionPcWriteRateLimitKey& key)
+{
+	static constexpr u32 kInitialBurstCount = 1;
+	static constexpr u32 kEveryNthAfterBurst = 128;
+	static std::array<std::pair<ExceptionPcWriteRateLimitKey, u32>, 16> s_recent_keys{};
+	static size_t s_next_replace = 0;
+
+	for (auto& entry : s_recent_keys)
+	{
+		ExceptionPcWriteRateLimitKey& saved_key = entry.first;
+		u32& count = entry.second;
+
+		if (count != 0 && saved_key == key)
+		{
+			count++;
+			return (count <= kInitialBurstCount) || ((count % kEveryNthAfterBurst) == 0);
+		}
+	}
+
+	std::pair<ExceptionPcWriteRateLimitKey, u32>& entry = s_recent_keys[s_next_replace++ % s_recent_keys.size()];
+	ExceptionPcWriteRateLimitKey& saved_key = entry.first;
+	u32& count = entry.second;
+	saved_key = key;
+	count = 1;
+	return true;
+}
+
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
 but in fast boot mode, the block we use can fit at least 16 argv pointers (varies with BIOS version).
 The second EELOAD call during full boot has three built-in arguments ("EELOAD rom0:PS2LOGO <ELF>"),
@@ -229,10 +265,17 @@ __ri void cpuException(u32 code, u32 bd)
 {
 	static bool s_logged_zero_exception_pc = false;
 	auto log_exception_pc_write = [&](const char* source, u32 destination_pc) {
-		DevCon.WriteLn(
-			"cpuException pc-write source=%s pc=0x%08x Status=0x%08x Cause=0x%08x EPC=0x%08x BadVAddr=0x%08x EntryHi=0x%08x",
-			source, destination_pc, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC,
-			cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.EntryHi);
+		const bool diagnostics_enabled = TraceLogging.EE.Bios.IsActive();
+		const ExceptionPcWriteRateLimitKey rate_limit_key{destination_pc, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC};
+		const bool should_log_pc_write = diagnostics_enabled && ShouldLogExceptionPcWriteDiagnostics(rate_limit_key);
+
+		if (should_log_pc_write)
+		{
+			DevCon.WriteLn(
+				"cpuException pc-write source=%s pc=0x%08x Status=0x%08x Cause=0x%08x EPC=0x%08x BadVAddr=0x%08x EntryHi=0x%08x",
+				source, destination_pc, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC,
+				cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.EntryHi);
+		}
 
 		if (!s_logged_zero_exception_pc && destination_pc == 0)
 		{
