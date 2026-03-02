@@ -2850,6 +2850,11 @@ bool VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
 {
 	const bool was_running_bios = (s_current_crc == 0);
 	const std::string requested_elf_path = elf_path;
+	std::string_view normalized_requested_elf_path = StringUtil::StripWhitespace(requested_elf_path);
+	const bool requested_bios_rom_device =
+		StringUtil::StartsWithNoCase(normalized_requested_elf_path, "rom0:") ||
+		StringUtil::StartsWithNoCase(normalized_requested_elf_path, "rom1:") ||
+		StringUtil::StartsWithNoCase(normalized_requested_elf_path, "rom2:");
 	std::string failure_reason;
 
 	const ELFLoadStatus load_status = UpdateELFInfo(std::move(elf_path), &failure_reason);
@@ -2866,6 +2871,15 @@ bool VMManager::Internal::ELFLoadingOnCPUThread(std::string elf_path)
 	}
 	else if (load_status == ELFLoadStatus::Error)
 	{
+		if (requested_bios_rom_device)
+		{
+			Console.Warning(fmt::format(
+				"Skipping external ELF validation for BIOS ROM path '{}': {}",
+				normalized_requested_elf_path,
+				failure_reason.empty() ? "unknown ELF load failure" : failure_reason));
+			return true;
+		}
+
 		Console.Error(fmt::format("Aborting ELF launch path for '{}': {}", requested_elf_path,
 			failure_reason.empty() ? "unknown ELF load failure" : failure_reason));
 		SetState(VMState::Paused);
