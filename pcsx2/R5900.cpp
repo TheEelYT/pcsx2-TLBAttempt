@@ -227,6 +227,23 @@ void cpuReset()
 
 __ri void cpuException(u32 code, u32 bd)
 {
+	static bool s_logged_zero_exception_pc = false;
+	auto log_exception_pc_write = [&](const char* source, u32 destination_pc) {
+		DevCon.WriteLn(
+			"cpuException pc-write source=%s pc=0x%08x Status=0x%08x Cause=0x%08x EPC=0x%08x BadVAddr=0x%08x EntryHi=0x%08x",
+			source, destination_pc, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC,
+			cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.EntryHi);
+
+		if (!s_logged_zero_exception_pc && destination_pc == 0)
+		{
+			s_logged_zero_exception_pc = true;
+			DevCon.Warning(
+				"cpuException one-shot warning: destination pc is zero (source=%s, Status=0x%08x, Cause=0x%08x, EPC=0x%08x, BadVAddr=0x%08x, EntryHi=0x%08x)",
+				source, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC, cpuRegs.CP0.n.BadVAddr,
+				cpuRegs.CP0.n.EntryHi);
+		}
+	};
+
 	bool errLevel2, checkStatus;
 	u32 offset = 0;
 
@@ -257,6 +274,7 @@ __ri void cpuException(u32 code, u32 bd)
 		{
 			//Reset / NMI
 			cpuRegs.pc = 0xBFC00000;
+			log_exception_pc_write("level2-reset", cpuRegs.pc);
 			Console.Warning("Reset request");
 			cpuUpdateOperationMode();
 			return;
@@ -331,21 +349,25 @@ __ri void cpuException(u32 code, u32 bd)
 	if ((offset == 0x0) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vtlbRefillHandler))
 	{
 		cpuRegs.pc = cpuRegs.vtlbRefillHandler;
+		log_exception_pc_write("refill", cpuRegs.pc);
 		BIOS_LOG("cpuException dispatch: refill vector->installed (pc=0x%08x, code=0x%08x)", cpuRegs.pc, code);
 	}
 	else if ((offset == 0x180) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vcommonHandler))
 	{
 		cpuRegs.pc = cpuRegs.vcommonHandler;
+		log_exception_pc_write("common", cpuRegs.pc);
 		BIOS_LOG("cpuException dispatch: common vector->installed (pc=0x%08x, code=0x%08x)", cpuRegs.pc, code);
 	}
 	else if ((offset == 0x200) && checkStatus && IsValidVTLBRefillHandlerAddress(cpuRegs.vinterruptHandler))
 	{
 		cpuRegs.pc = cpuRegs.vinterruptHandler;
+		log_exception_pc_write("interrupt", cpuRegs.pc);
 		BIOS_LOG("cpuException dispatch: interrupt vector->installed (pc=0x%08x, code=0x%08x)", cpuRegs.pc, code);
 	}
 	else
 	{
 		cpuRegs.pc = vector_pc;
+		log_exception_pc_write("base-vector", cpuRegs.pc);
 		BIOS_LOG("cpuException dispatch: vector base (offset=0x%03x, pc=0x%08x, code=0x%08x)", offset, cpuRegs.pc, code);
 	}
 

@@ -94,6 +94,40 @@ static __fi bool COP0_IsTLBManagedVaddr(u32 vaddr)
 	return (segment_class != 4) && (segment_class != 5);
 }
 
+static __fi bool COP0_TLBMappingCouldCoverVirtualPageZero(const tlbs& t)
+{
+	const bool even_valid = t.EntryLo0.V != 0;
+	const bool odd_valid = t.EntryLo1.V != 0;
+	if (!even_valid && !odd_valid)
+		return false;
+
+	const u32 compare_mask = COP0_GetTLBCompareMask(t);
+	const bool vpn2_matches_zero = (t.EntryHi.VPN2 & compare_mask) == 0;
+	if (!vpn2_matches_zero)
+		return false;
+
+	return even_valid;
+}
+
+static void COP0_LogTLBWriteDiagnostics(const char* op, const tlbs& t, int index)
+{
+	if (TraceLogging.EE.Bios.IsActive())
+	{
+		DevCon.WriteLn(
+			"%s result index=%d EntryHi=0x%08x EntryLo0=0x%08x EntryLo1=0x%08x PageMask=0x%08x",
+			op, index, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL, t.PageMask.UL);
+	}
+
+	static bool s_logged_page_zero_warning = false;
+	if (!s_logged_page_zero_warning && COP0_TLBMappingCouldCoverVirtualPageZero(t))
+	{
+		s_logged_page_zero_warning = true;
+		DevCon.Warning(
+			"COP0 one-shot warning: %s produced TLB mapping covering virtual page zero (index=%d, EntryHi=0x%08x, EntryLo0=0x%08x, EntryLo1=0x%08x, PageMask=0x%08x)",
+			op, index, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL, t.PageMask.UL);
+	}
+}
+
 #ifdef PCSX2_DEVBUILD
 static void COP0_LogTLBProtectedSegmentWarning(const tlbs& t, int index, u32 vaddr, bool map)
 {
@@ -562,6 +596,7 @@ namespace COP0 {
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
+		COP0_LogTLBWriteDiagnostics("TLBWI", tlb[j], j);
 	}
 
 	void TLBWR()
@@ -588,6 +623,7 @@ namespace COP0 {
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
+		COP0_LogTLBWriteDiagnostics("TLBWR", tlb[j], j);
 	}
 
 	void TLBP()

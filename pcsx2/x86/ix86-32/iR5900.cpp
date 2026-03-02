@@ -354,6 +354,45 @@ static const void* EnterRecompiledCode = nullptr;
 static const void* DispatchBlockDiscard = nullptr;
 static const void* DispatchPageReset = nullptr;
 
+enum class RecRecompileCallerSource : u32
+{
+	Unknown = 0,
+	Dispatcher = 1,
+	BlockLink = 2,
+	ExceptionReturn = 3,
+};
+
+static RecRecompileCallerSource s_rec_recompile_caller_source = RecRecompileCallerSource::Unknown;
+static bool s_logged_rec_recompile_zero_pc = false;
+
+static const char* RecRecompileCallerSourceToString(const RecRecompileCallerSource source)
+{
+	switch (source)
+	{
+		case RecRecompileCallerSource::Dispatcher:
+			return "dispatcher";
+		case RecRecompileCallerSource::BlockLink:
+			return "block-link";
+		case RecRecompileCallerSource::ExceptionReturn:
+			return "exception-return";
+		default:
+			return "unknown";
+	}
+}
+
+static void recLogZeroPcBeforeRecompile(const u32 startpc)
+{
+	if (s_logged_rec_recompile_zero_pc || cpuRegs.pc != 0)
+		return;
+
+	s_logged_rec_recompile_zero_pc = true;
+	DevCon.Warning(
+		"[EE] recRecompile callsite one-shot: cpuRegs.pc is zero (startpc=0x%08X, source=%s, EPC=0x%08X, ErrorEPC=0x%08X, Status=0x%08X, Cause=0x%08X, BadVAddr=0x%08X, EntryHi=0x%08X)",
+		startpc, RecRecompileCallerSourceToString(s_rec_recompile_caller_source), cpuRegs.CP0.n.EPC,
+		cpuRegs.CP0.n.ErrorEPC, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.BadVAddr,
+		cpuRegs.CP0.n.EntryHi);
+}
+
 static void recEventTest()
 {
 	_cpuEventTest_Shared();
@@ -373,12 +412,15 @@ static const void* _DynGen_JITCompile()
 
 	u8* retval = xGetAlignedCallTarget();
 
+	xMOV(ptr32[&s_rec_recompile_caller_source], static_cast<u32>(RecRecompileCallerSource::Dispatcher));
+	xFastCall((const void*)recLogZeroPcBeforeRecompile, ptr32[&cpuRegs.pc]);
 	xFastCall((const void*)recRecompile, ptr32[&cpuRegs.pc]);
 
 	// C equivalent:
 	// u32 addr = cpuRegs.pc;
 	// void(**base)() = (void(**)())recLUT[addr >> 16];
 	// base[addr >> 2]();
+	xMOV(ptr32[&s_rec_recompile_caller_source], static_cast<u32>(RecRecompileCallerSource::Dispatcher));
 	xMOV(eax, ptr[&cpuRegs.pc]);
 	xMOV(ebx, eax);
 	xSHR(eax, 16);
@@ -879,6 +921,9 @@ void SetBranchImm(u32 imm)
 
 	pxAssert(imm);
 
+	if (imm == cpuRegs.CP0.n.EPC || imm == cpuRegs.CP0.n.ErrorEPC)
+		s_rec_recompile_caller_source = RecRecompileCallerSource::ExceptionReturn;
+
 	// end the current block
 	iFlushCall(FLUSH_EVERYTHING);
 	xMOV(ptr32[&cpuRegs.pc], imm);
@@ -1377,10 +1422,14 @@ static void iBranchTest(u32 newpc)
 		xMOV(ptr[&cpuRegs.cycle], eax); // update cycles
 		xSUB(eax, ptr[&cpuRegs.nextEventCycle]);
 
+		xMOV(ptr32[&s_rec_recompile_caller_source], static_cast<u32>(RecRecompileCallerSource::Dispatcher));
 		if (newpc == 0xffffffff)
 			xJS(DispatcherReg);
 		else
+		{
+			xMOV(ptr32[&s_rec_recompile_caller_source], static_cast<u32>(RecRecompileCallerSource::BlockLink));
 			recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
+		}
 
 		xJMP((void*)DispatcherEvent);
 	}
