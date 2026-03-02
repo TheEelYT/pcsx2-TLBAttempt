@@ -994,7 +994,8 @@ void eeloadHook()
 		}
 	}
 
-	VMManager::Internal::ELFLoadingOnCPUThread(std::move(elfname));
+	if (!VMManager::Internal::ELFLoadingOnCPUThread(std::move(elfname)))
+		return;
 
 	if (CHECK_EXTRAMEM)
 	{
