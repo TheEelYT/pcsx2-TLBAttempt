@@ -1030,6 +1030,7 @@ struct Pcsx2Config
 		bool HddEnable{false};
 		std::string HddFile;
 		std::string FlashFile;
+		bool FlashAutoCreate{true};
 
 		DEV9Options();
 

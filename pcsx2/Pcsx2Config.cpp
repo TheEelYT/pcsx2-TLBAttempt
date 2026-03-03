@@ -1284,6 +1284,7 @@ Pcsx2Config::DEV9Options::DEV9Options()
 {
 	HddFile = "DEV9hdd.raw";
 	FlashFile = "flash.dat";
+	FlashAutoCreate = true;
 }
 
 void Pcsx2Config::DEV9Options::LoadSave(SettingsWrapper& wrap)
@@ -1375,6 +1376,7 @@ void Pcsx2Config::DEV9Options::LoadSave(SettingsWrapper& wrap)
 		SettingsWrapEntry(HddEnable);
 		SettingsWrapEntry(HddFile);
 		SettingsWrapEntry(FlashFile);
+		SettingsWrapEntry(FlashAutoCreate);
 	}
 }
 
@@ -1406,7 +1408,8 @@ bool Pcsx2Config::DEV9Options::operator==(const DEV9Options& right) const
 
 		   OpEqu(HddEnable) &&
 		   OpEqu(HddFile) &&
-		   OpEqu(FlashFile);
+		   OpEqu(FlashFile) &&
+		   OpEqu(FlashAutoCreate);
 }
 
 void Pcsx2Config::DEV9Options::LoadIPHelper(u8* field, const std::string& setting)
