@@ -5,6 +5,12 @@
 #include <stdio.h>
 //#include <winsock2.h>
 #include "DEV9.h"
+#include "Config.h"
+#include "common/FileSystem.h"
+#include "common/Path.h"
+
+#include <algorithm>
+#include <vector>
 
 #define PAGE_SIZE_BITS 9
 #define PAGE_SIZE (1 << PAGE_SIZE_BITS)
@@ -22,6 +28,54 @@ static bool flash_file_loaded = false;
 static bool warned_missing_flash_before_read = false;
 static bool logged_biexec_lookup_transition = false;
 static u32 flash_read_sequence = 0;
+
+static std::string ResolveAbsolutePath(const std::string& path, const std::string& relative_to)
+{
+	if (Path::IsAbsolute(path))
+		return Path::Canonicalize(path);
+
+	return Path::Canonicalize(Path::Combine(relative_to, path));
+}
+
+static std::vector<std::string> GetFlashCandidatePaths()
+{
+	const std::string configured_path = EmuConfig.DEV9.FlashFile.empty() ? "flash.dat" : EmuConfig.DEV9.FlashFile;
+	const std::string cwd = FileSystem::GetWorkingDirectory();
+	std::vector<std::string> candidates;
+
+	if (Path::IsAbsolute(configured_path))
+	{
+		candidates.push_back(Path::Canonicalize(configured_path));
+	}
+	else
+	{
+		candidates.push_back(ResolveAbsolutePath(configured_path, EmuFolders::Settings));
+		if (configured_path != "flash.dat")
+			candidates.push_back(ResolveAbsolutePath(configured_path, cwd));
+		candidates.push_back(ResolveAbsolutePath("flash.dat", EmuFolders::Settings));
+		candidates.push_back(ResolveAbsolutePath("flash.dat", cwd));
+	}
+
+	std::vector<std::string> unique;
+	for (const std::string& candidate : candidates)
+	{
+		if (std::find(unique.begin(), unique.end(), candidate) == unique.end())
+			unique.push_back(candidate);
+	}
+	return unique;
+}
+
+static std::string BuildCandidateListForLog(const std::vector<std::string>& candidates)
+{
+	std::string output;
+	for (size_t i = 0; i < candidates.size(); i++)
+	{
+		if (!output.empty())
+			output += "; ";
+		output += candidates[i];
+	}
+	return output;
+}
 
 static void xfromman_call20_calculateXors(unsigned char buffer[128], unsigned char blah[4]);
 
@@ -78,24 +132,37 @@ void FLASHinit()
 	logged_biexec_lookup_transition = false;
 	flash_read_sequence = 0;
 
-	FILE* fd = fopen("flash.dat", "rb");
-	if (fd != NULL)
+	const std::vector<std::string> flash_candidates = GetFlashCandidatePaths();
+	const std::string configured_flash = EmuConfig.DEV9.FlashFile.empty() ? "flash.dat" : EmuConfig.DEV9.FlashFile;
+	DevCon.WriteLn("DEV9: flash image lookup (setting DEV9/Hdd/FlashFile='%s') candidates: %s",
+		configured_flash.c_str(), BuildCandidateListForLog(flash_candidates).c_str());
+
+	for (const std::string& flash_candidate : flash_candidates)
 	{
+		FILE* fd = fopen(flash_candidate.c_str(), "rb");
+		if (fd == nullptr)
+			continue;
+
 		const size_t ret = fread(file, 1, CARD_SIZE_ECC, fd);
+		fclose(fd);
+
 		if (ret != CARD_SIZE_ECC)
 		{
-			DevCon.WriteLn("DEV9: Reading error.");
-		}
-		else
-		{
-			flash_file_loaded = true;
+			DevCon.Warning("DEV9: flash image '%s' has wrong size (read=%zu expected=%u), ignoring.",
+				flash_candidate.c_str(), ret, static_cast<unsigned>(CARD_SIZE_ECC));
+			continue;
 		}
 
-		fclose(fd);
+		flash_file_loaded = true;
+		DevCon.WriteLn("DEV9: loaded flash image from '%s'.", flash_candidate.c_str());
+		break;
 	}
-	else
+
+	if (!flash_file_loaded)
 	{
-		DevCon.Warning("DEV9: flash.dat not found, using erased flash image for this BIOS/profile.");
+		DevCon.Warning(
+			"DEV9: no flash backing file found. Place 'flash.dat' in the settings directory ('%s') or set DEV9/Hdd/FlashFile to an absolute or settings-relative path. Lookup attempted: %s. Using erased flash image (0xFF).",
+			EmuFolders::Settings.c_str(), BuildCandidateListForLog(flash_candidates).c_str());
 		memset(file, 0xFF, CARD_SIZE_ECC);
 	}
 }

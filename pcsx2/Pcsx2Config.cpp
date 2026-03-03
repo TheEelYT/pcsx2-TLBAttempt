@@ -1283,6 +1283,7 @@ const char* Pcsx2Config::DEV9Options::DnsModeNames[] = {
 Pcsx2Config::DEV9Options::DEV9Options()
 {
 	HddFile = "DEV9hdd.raw";
+	FlashFile = "flash.dat";
 }
 
 void Pcsx2Config::DEV9Options::LoadSave(SettingsWrapper& wrap)
@@ -1373,6 +1374,7 @@ void Pcsx2Config::DEV9Options::LoadSave(SettingsWrapper& wrap)
 		SettingsWrapSection("DEV9/Hdd");
 		SettingsWrapEntry(HddEnable);
 		SettingsWrapEntry(HddFile);
+		SettingsWrapEntry(FlashFile);
 	}
 }
 
@@ -1403,7 +1405,8 @@ bool Pcsx2Config::DEV9Options::operator==(const DEV9Options& right) const
 		   OpEqu(EthHosts) &&
 
 		   OpEqu(HddEnable) &&
-		   OpEqu(HddFile);
+		   OpEqu(HddFile) &&
+		   OpEqu(FlashFile);
 }
 
 void Pcsx2Config::DEV9Options::LoadIPHelper(u8* field, const std::string& setting)
