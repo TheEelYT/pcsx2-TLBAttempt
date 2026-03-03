@@ -155,6 +155,62 @@ static __fi bool COP0_ShouldWarnAboutVirtualPageZeroMapping(const tlbs& t)
 	return !kernel_context || unexpected_asid_global_combo || !COP0_IsExpectedKernelBootZeroMapping(t);
 }
 
+struct COP0TLBActivityCounters
+{
+	u64 tlbwi = 0;
+	u64 tlbwr = 0;
+	u64 tlbp = 0;
+	u64 map_tlb = 0;
+	u64 unmap_tlb = 0;
+	u64 last_logged_total = 0;
+};
+
+static COP0TLBActivityCounters s_cop0_tlb_activity_counters;
+static constexpr u64 COP0_TLB_ACTIVITY_LOG_PERIOD = 1024;
+
+static void COP0_LogTLBActivitySummaryIfNeeded(bool force = false)
+{
+	if (!TraceLogging.EE.Bios.IsActive())
+		return;
+
+	const u64 total_ops = s_cop0_tlb_activity_counters.tlbwi + s_cop0_tlb_activity_counters.tlbwr +
+		s_cop0_tlb_activity_counters.tlbp + s_cop0_tlb_activity_counters.map_tlb +
+		s_cop0_tlb_activity_counters.unmap_tlb;
+
+	if (total_ops == 0)
+		return;
+
+	if (!force && (total_ops - s_cop0_tlb_activity_counters.last_logged_total) < COP0_TLB_ACTIVITY_LOG_PERIOD)
+		return;
+
+	DevCon.WriteLn(
+		"COP0 TLB activity summary: total=%llu TLBWI=%llu TLBWR=%llu TLBP=%llu MapTLB=%llu UnmapTLB=%llu",
+		total_ops,
+		s_cop0_tlb_activity_counters.tlbwi,
+		s_cop0_tlb_activity_counters.tlbwr,
+		s_cop0_tlb_activity_counters.tlbp,
+		s_cop0_tlb_activity_counters.map_tlb,
+		s_cop0_tlb_activity_counters.unmap_tlb);
+
+	s_cop0_tlb_activity_counters.last_logged_total = total_ops;
+}
+
+static __fi void COP0_RecordTLBActivityCounter(u64& counter)
+{
+	counter++;
+	COP0_LogTLBActivitySummaryIfNeeded();
+}
+
+struct COP0TLBActivitySummaryOnShutdown
+{
+	~COP0TLBActivitySummaryOnShutdown()
+	{
+		COP0_LogTLBActivitySummaryIfNeeded(true);
+	}
+};
+
+static COP0TLBActivitySummaryOnShutdown s_cop0_tlb_activity_summary_on_shutdown;
+
 static void COP0_LogTLBWriteDiagnostics(const char* op, const tlbs& t, int index)
 {
 	if (TraceLogging.EE.Bios.IsActive())
@@ -205,13 +261,13 @@ static void COP0_LogSkippedTLBPageOpOnce(int index, u32 vaddr, bool map, bool od
 	const u64 signature = (static_cast<u64>(map) << 63) |
 		(static_cast<u64>(odd_page) << 62) |
 		(static_cast<u64>(index & 0xff) << 32) |
-		static_cast<u64>(vaddr);
+		static_cast<u64>(vaddr >> 29);
 
 	if (!s_logged_signatures.insert(signature).second)
 		return;
 
-	DevCon.Warning("COP0: Skipping %s TLB page op for non-TLB-managed vaddr 0x%08X (index=%d, page=%u)",
-		map ? "map" : "unmap", vaddr, index, odd_page ? 1 : 0);
+	DevCon.Warning("COP0: Skipping %s TLB page op for non-TLB-managed segment class %u (example vaddr=0x%08X, index=%d, page=%u)",
+		map ? "map" : "unmap", vaddr >> 29, vaddr, index, odd_page ? 1 : 0);
 }
 #endif
 
@@ -438,6 +494,7 @@ __fi void COP0_UpdatePCCR()
 
 void MapTLB(const tlbs& t, int i)
 {
+	COP0_RecordTLBActivityCounter(s_cop0_tlb_activity_counters.map_tlb);
 	u32 addr;
 	u32 saddr, eaddr;
 
@@ -500,6 +557,7 @@ __inline u32 ConvertPageMask(const u32 PageMask)
 
 void UnmapTLB(const tlbs& t, int i)
 {
+	COP0_RecordTLBActivityCounter(s_cop0_tlb_activity_counters.unmap_tlb);
 	//Console.WriteLn("Clear TLB %d: %08x-> [%08x %08x] S=%d G=%d ASID=%d Mask= %03X", i,t.VPN2,t.PFN0,t.PFN1,t.S,t.G,t.ASID,t.Mask);
 	u32 saddr, eaddr;
 
@@ -632,6 +690,7 @@ namespace COP0 {
 
 	void TLBWI()
 	{
+		COP0_RecordTLBActivityCounter(s_cop0_tlb_activity_counters.tlbwi);
 		const u8 j = cpuRegs.CP0.n.Index & 0x3f;
 
 		if (j > 47)
@@ -658,6 +717,7 @@ namespace COP0 {
 
 	void TLBWR()
 	{
+		COP0_RecordTLBActivityCounter(s_cop0_tlb_activity_counters.tlbwr);
 		const u32 wired = COP0_GetSanitizedWired();
 		const u8 j = static_cast<u8>(COP0_SanitizeRandomForWired(cpuRegs.CP0.n.Random, wired));
 
@@ -685,6 +745,7 @@ namespace COP0 {
 
 	void TLBP()
 	{
+		COP0_RecordTLBActivityCounter(s_cop0_tlb_activity_counters.tlbp);
 		cpuRegs.CP0.n.Index = 0x80000000;
 		for (u32 i = 0; i < 48; i++)
 		{
