@@ -23,6 +23,8 @@
 #include <sys/stat.h>
 #include <algorithm>
 #include <array>
+#include <unordered_set>
+#include <vector>
 
 #include <fcntl.h>
 
@@ -375,6 +377,16 @@ namespace R3000A
 	}
 
 	static bool s_xfrom_readable_biexec = false;
+	static std::unordered_set<std::string> s_xfrom_logged_biexec_probes;
+
+	static void xfrom_log_biexec_probe_once(const char* source, const std::string& candidate, const bool exists)
+	{
+		if (candidate.empty() || !s_xfrom_logged_biexec_probes.emplace(candidate).second)
+			return;
+
+		Console.WriteLn("XFROM: BIEXEC probe %s source='%s' candidate='%s'",
+			exists ? "exists" : "missing", source, candidate.c_str());
+	}
 
 	class XFromFile final : public IOManFile
 	{
@@ -396,16 +408,63 @@ namespace R3000A
 			Console.WriteLn("XFROM: open request='%s' normalized='%s'", full_path.c_str(), normalized.c_str());
 
 			const std::string rel = normalized.substr(1);
-			const std::array<std::pair<const char*, std::string>, 4> candidates = {{
-				{"flash.dat (raw image)", Path::Canonicalize("flash.dat")},
-				{"hostRoot/BIEXEC tree", Path::Canonicalize(Path::Combine(hostRoot, rel))},
-				{"hostRoot/xfrom tree", Path::Canonicalize(Path::Combine(hostRoot, Path::Combine("xfrom", rel)))},
-				{"cwd xfrom tree", Path::Canonicalize(Path::Combine("xfrom", rel))},
-			}};
+			std::vector<std::pair<const char*, std::string>> candidates;
+			std::unordered_set<std::string> unique_candidates;
+
+			auto add_candidate = [&candidates, &unique_candidates](const char* source, std::string path) {
+				if (path.empty())
+					return;
+
+				path = Path::Canonicalize(path);
+				if (path.empty() || !unique_candidates.emplace(path).second)
+					return;
+
+				candidates.emplace_back(source, std::move(path));
+			};
+
+			const auto add_candidate_root = [&add_candidate, &rel](const char* source, const std::string& root) {
+				if (root.empty())
+					return;
+
+				add_candidate(source, Path::Combine(root, rel));
+			};
+
+			add_candidate("flash.dat (raw image)", "flash.dat");
+			add_candidate_root("hostRoot/BIEXEC tree", hostRoot);
+			add_candidate_root("hostRoot/xfrom tree", Path::Combine(hostRoot, "xfrom"));
+			add_candidate_root("cwd xfrom tree", "xfrom");
+
+			add_candidate_root("BIOS assets", EmuFolders::Bios);
+			add_candidate_root("resources", EmuFolders::Resources);
+			add_candidate_root("user resources", EmuFolders::UserResources);
+			add_candidate_root("settings", EmuFolders::Settings);
+			add_candidate_root("app root", EmuFolders::AppRoot);
+			add_candidate_root("data root", EmuFolders::DataRoot);
+
+			if (!EmuConfig.DEV9.HddFile.empty())
+			{
+				const std::string hdd_path = Path::Canonicalize(EmuConfig.DEV9.HddFile);
+				const std::string hdd_dir(Path::GetDirectory(hdd_path));
+				const std::string hdd_title(Path::GetFileTitle(hdd_path));
+
+				add_candidate_root("DEV9 HDD path", hdd_path);
+				add_candidate_root("DEV9 HDD parent", hdd_dir);
+				add_candidate_root("DEV9 HDD parent/xfrom", Path::Combine(hdd_dir, "xfrom"));
+				add_candidate_root("DEV9 HDD parent/BIEXEC-SYSTEM", Path::Combine(hdd_dir, "BIEXEC-SYSTEM"));
+				if (!hdd_title.empty())
+				{
+					add_candidate_root("DEV9 HDD extract tree", Path::Combine(hdd_dir, hdd_title));
+					add_candidate_root("DEV9 HDD extract tree/xfrom", Path::Combine(Path::Combine(hdd_dir, hdd_title), "xfrom"));
+				}
+			}
 
 			for (const auto& [source, candidate] : candidates)
 			{
-				if (candidate.empty() || !FileSystem::FileExists(candidate.c_str()))
+				const bool exists = FileSystem::FileExists(candidate.c_str());
+				if (is_biexec_elf)
+					xfrom_log_biexec_probe_once(source, candidate, exists);
+
+				if (!exists)
 					continue;
 
 				const int fd = ::open(candidate.c_str(), O_RDONLY | O_BINARY);
