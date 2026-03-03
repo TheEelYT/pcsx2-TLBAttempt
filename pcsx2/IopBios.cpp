@@ -339,7 +339,7 @@ namespace R3000A
 		{
 		}
 
-		~XFromFile() override = default;
+		~XFromFile() = default;
 
 		void close() override
 		{
