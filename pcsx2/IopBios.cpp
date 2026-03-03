@@ -22,6 +22,7 @@
 #include <fmt/format.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <array>
 
 #include <fcntl.h>
 
@@ -221,6 +222,151 @@ namespace R3000A
 
 		return 0;
 	}
+
+	static bool iequals_ascii(const std::string_view lhs, const std::string_view rhs)
+	{
+		return lhs.size() == rhs.size() &&
+			std::equal(lhs.begin(), lhs.end(), rhs.begin(), [](const char a, const char b) {
+				return static_cast<char>(std::tolower(static_cast<unsigned char>(a))) ==
+					static_cast<char>(std::tolower(static_cast<unsigned char>(b)));
+			});
+	}
+
+	static bool starts_with_case_insensitive(const std::string_view value, const std::string_view prefix)
+	{
+		if (value.size() < prefix.size())
+			return false;
+		return iequals_ascii(value.substr(0, prefix.size()), prefix);
+	}
+
+	static constexpr int XFROM_GENERIC_FAILURE = -31;
+
+	static const char* xfrom_error_reason(const int err)
+	{
+		switch (err)
+		{
+			case XFROM_GENERIC_FAILURE:
+				return "generic failure mapped by XFROM layer (file not found or backing device unavailable)";
+			case -IOP_ENOENT:
+				return "file not found";
+			case -IOP_ENODEV:
+				return "device unavailable";
+			case -IOP_EIO:
+				return "I/O error";
+			default:
+				return "unmapped/unknown";
+		}
+	}
+
+	static std::string normalize_xfrom_path(const std::string_view full_path)
+	{
+		const size_t colon = full_path.find(':');
+		std::string relative = (colon == std::string::npos) ? std::string(full_path) : std::string(full_path.substr(colon + 1));
+		std::replace(relative.begin(), relative.end(), '\\', '/');
+		while (!relative.empty() && relative.front() == '/')
+			relative.erase(relative.begin());
+		std::string normalized = "/";
+		normalized += relative;
+		return normalized;
+	}
+
+	static bool s_xfrom_readable_biexec = false;
+
+	class XFromFile final : public IOManFile
+	{
+	public:
+		static int open(IOManFile** file, const std::string& full_path, s32 flags, u16 mode)
+		{
+			(void)mode;
+			*file = nullptr;
+
+			if ((flags & IOP_O_WRONLY) || (flags & IOP_O_RDWR))
+				return -IOP_EROFS;
+
+			const std::string normalized = normalize_xfrom_path(full_path);
+			Console.WriteLn("XFROM: open request='%s' normalized='%s'", full_path.c_str(), normalized.c_str());
+
+			const std::string rel = normalized.substr(1);
+			const std::array<std::pair<const char*, std::string>, 4> candidates = {{
+				{"flash.dat (raw image)", Path::Canonicalize("flash.dat")},
+				{"hostRoot/BIEXEC tree", Path::Canonicalize(Path::Combine(hostRoot, rel))},
+				{"hostRoot/xfrom tree", Path::Canonicalize(Path::Combine(hostRoot, Path::Combine("xfrom", rel)))},
+				{"cwd xfrom tree", Path::Canonicalize(Path::Combine("xfrom", rel))},
+			}};
+
+			for (const auto& [source, candidate] : candidates)
+			{
+				if (candidate.empty() || !FileSystem::FileExists(candidate.c_str()))
+					continue;
+
+				const int fd = ::open(candidate.c_str(), O_RDONLY | O_BINARY);
+				if (fd < 0)
+					continue;
+
+				Console.WriteLn("XFROM: resolved='%s' mount/source='%s'", candidate.c_str(), source);
+				*file = new XFromFile(fd, candidate, source);
+				return 0;
+			}
+
+			Console.Warning("XFROM: failed to resolve '%s' (normalized '%s'). Returning %d (%s)",
+				full_path.c_str(), normalized.c_str(), XFROM_GENERIC_FAILURE, xfrom_error_reason(XFROM_GENERIC_FAILURE));
+			return XFROM_GENERIC_FAILURE;
+		}
+
+		XFromFile(const int xfd, std::string path, std::string source)
+			: fd(xfd)
+			, resolved_path(std::move(path))
+			, selected_source(std::move(source))
+		{
+		}
+
+		~XFromFile() override = default;
+
+		void close() override
+		{
+			::close(fd);
+			fd = -1;
+		}
+
+		int lseek(s32 offset, s32 whence) override
+		{
+			const int err = static_cast<int>(::lseek(fd, offset, whence));
+			if (err >= 0)
+				position = err;
+			return HostFile::translate_error(err);
+		}
+
+		int read(void* buf, u32 count) override
+		{
+			const int before = position;
+			const int ret = static_cast<int>(::read(fd, buf, count));
+			const int mapped = HostFile::translate_error(ret);
+			if (ret > 0)
+				position += ret;
+
+			const u32 sector = static_cast<u32>(before >= 0 ? (before / 512) : 0);
+			const u32 page = static_cast<u32>(before >= 0 ? (before / 512) : 0);
+			Console.WriteLn(
+				"XFROM: read resolved='%s' source='%s' before=%d count=%u -> ret=%d mapped=%d (%s), sector=%u page=%u",
+				resolved_path.c_str(), selected_source.c_str(), before, count, ret, mapped, xfrom_error_reason(mapped), sector, page);
+
+			if (ret > 0 && (Path::GetFileName(resolved_path) == "osd180.elf" || Path::GetFileName(resolved_path) == "osdmain.elf"))
+			{
+				s_xfrom_readable_biexec = true;
+				Console.WriteLn("XFROM: BIEXEC ELF read succeeded (%s, bytes=%d).", Path::GetFileName(resolved_path), ret);
+			}
+
+			if (ret < 0 && mapped == -IOP_ENOENT)
+				return XFROM_GENERIC_FAILURE;
+			return mapped;
+		}
+
+	private:
+		int fd = -1;
+		int position = 0;
+		std::string resolved_path;
+		std::string selected_source;
+	};
 
 	static int host_stat(const std::string& path, fxio_stat_t* host_stats)
 	{
@@ -589,8 +735,9 @@ namespace R3000A
 			const std::string path = clean_path(Ra0);
 			s32 flags = a1;
 			u16 mode = a2;
+			const bool is_xfrom = starts_with_case_insensitive(path, "xfrom:");
 
-			if (is_host(path))
+			if (is_host(path) || is_xfrom)
 			{
 				if (!freefdcount())
 				{
@@ -599,7 +746,11 @@ namespace R3000A
 					return 1;
 				}
 
-				int err = HostFile::open(&file, path, flags, mode);
+				int err = 0;
+				if (is_xfrom)
+					err = XFromFile::open(&file, path, flags, mode);
+				else
+					err = HostFile::open(&file, path, flags, mode);
 
 				if (err != 0 || !file)
 				{
@@ -607,6 +758,10 @@ namespace R3000A
 						err = -IOP_EIO;
 					if (file) // ??????
 						file->close();
+					if (is_xfrom && err == XFROM_GENERIC_FAILURE)
+					{
+						Console.Warning("XFROM: open failed with %d mapped reason: %s", err, xfrom_error_reason(err));
+					}
 					v0 = err;
 				}
 				else
@@ -622,6 +777,10 @@ namespace R3000A
 						handle.full_path = path;
 						handle.mode = mode;
 						handles.push_back(handle);
+						if (is_xfrom && starts_with_case_insensitive(path, "xfrom:/BIEXEC-SYSTEM/"))
+						{
+							Console.WriteLn("XFROM: BIEXEC open succeeded fd=%d path='%s' readable_state=%s", v0, path.c_str(), s_xfrom_readable_biexec ? "true" : "false");
+						}
 					}
 				}
 
@@ -852,6 +1011,22 @@ namespace R3000A
 				auto buf = std::make_unique<char[]>(count);
 
 				v0 = file->read(buf.get(), count);
+
+				for (const fileHandle& handle : handles)
+				{
+					if (handle.fd_index + firstfd != static_cast<u32>(fd) || !starts_with_case_insensitive(handle.full_path, "xfrom:/BIEXEC-SYSTEM/"))
+						continue;
+
+					if (v0 >= 0)
+					{
+						Console.WriteLn("XFROM: BIEXEC read verified fd=%d bytes=%d (boot can continue).", fd, v0);
+					}
+					else
+					{
+						Console.Warning("XFROM: BIEXEC read failed fd=%d ret=%d (%s)", fd, v0, xfrom_error_reason(v0));
+					}
+					break;
+				}
 
 				[[likely]]
 				if (v0 >= 0 && iopMemSafeWriteBytes(data, buf.get(), v0))
