@@ -18,6 +18,10 @@
 
 static u32 ctrl, cmd = static_cast<u32>(-1), address, id, counter, addrbyte;
 static u8 data[PAGE_SIZE_ECC], file[CARD_SIZE_ECC];
+static bool flash_file_loaded = false;
+static bool warned_missing_flash_before_read = false;
+static bool logged_biexec_lookup_transition = false;
+static u32 flash_read_sequence = 0;
 
 static void xfromman_call20_calculateXors(unsigned char buffer[128], unsigned char blah[4]);
 
@@ -69,6 +73,10 @@ void FLASHinit()
 	memset(data, 0xFF, PAGE_SIZE);
 	calculateECC(data);
 	ctrl = FLASH_PP_READY;
+	flash_file_loaded = false;
+	warned_missing_flash_before_read = false;
+	logged_biexec_lookup_transition = false;
+	flash_read_sequence = 0;
 
 	FILE* fd = fopen("flash.dat", "rb");
 	if (fd != NULL)
@@ -78,11 +86,38 @@ void FLASHinit()
 		{
 			DevCon.WriteLn("DEV9: Reading error.");
 		}
+		else
+		{
+			flash_file_loaded = true;
+		}
 
 		fclose(fd);
 	}
 	else
+	{
+		DevCon.Warning("DEV9: flash.dat not found, using erased flash image for this BIOS/profile.");
 		memset(file, 0xFF, CARD_SIZE_ECC);
+	}
+}
+
+static u32 decodeReadValue(const u8* src, int size)
+{
+	u32 value = 0;
+	for (int i = 0; i < size; i++)
+		value |= static_cast<u32>(src[i]) << (i * 8);
+	return value;
+}
+
+static void logFlashReadWindow(const char* context)
+{
+	const u32 blocks = address / BLOCK_SIZE;
+	const u32 block_offset = address - (blocks * BLOCK_SIZE);
+	const u32 pages = block_offset / PAGE_SIZE;
+	const u32 bytes = block_offset % PAGE_SIZE;
+	DevCon.WriteLn(
+		"DEV9: *FLASH %s seq=%u cmd=%s address=0x%08lX (block=%u page=%u byte=%u) counter=%u window=[%02X %02X %02X %02X]",
+		context, flash_read_sequence, getCmdName(cmd), address, blocks, pages, bytes, counter,
+		data[0], data[1], data[2], data[3]);
 }
 
 u32 FLASHread32(u32 addr, int size)
@@ -92,9 +127,21 @@ u32 FLASHread32(u32 addr, int size)
 	switch (addr)
 	{
 		case FLASH_R_DATA:
-			memcpy(&value, &data[counter], size);
+			if (!flash_file_loaded && !warned_missing_flash_before_read)
+			{
+				DevCon.Warning("DEV9: *FLASH DATA read while flash image is missing; reads come from erased (0xFF) backing store.");
+				warned_missing_flash_before_read = true;
+			}
+
+			value = decodeReadValue(&data[counter], size);
 			counter += size;
 			DevCon.WriteLn("DEV9: *FLASH DATA %dbit read 0x%08lX %s", size * 8, value, (ctrl & FLASH_PP_READ) ? "READ_ENABLE" : "READ_DISABLE");
+			const u32 read_start = counter - static_cast<u32>(size);
+			if (size == 4 && value == 0xFFFFFFFF && (data[read_start] != 0xFF || data[read_start + 1] != 0xFF || data[read_start + 2] != 0xFF || data[read_start + 3] != 0xFF))
+			{
+				DevCon.Warning("DEV9: *FLASH DATA suspicious 32-bit packing produced 0xFFFFFFFF but source bytes were %02X %02X %02X %02X",
+					data[read_start], data[read_start + 1], data[read_start + 2], data[read_start + 3]);
+			}
 			if (cmd == SM_CMD_READ3)
 			{
 				if (counter >= PAGE_SIZE_ECC)
@@ -125,6 +172,8 @@ u32 FLASHread32(u32 addr, int size)
 				memcpy(data, file + (address >> PAGE_SIZE_BITS) * PAGE_SIZE_ECC, PAGE_SIZE);
 				calculateECC(data); // calculate ECC; should be in the file already
 				ctrl |= FLASH_PP_READY;
+				flash_read_sequence++;
+				logFlashReadWindow("READ WINDOW REFILL");
 			}
 
 			return value;
@@ -193,6 +242,12 @@ void FLASHwrite32(u32 addr, u32 value, int size)
 				}
 			}
 			DevCon.WriteLn("DEV9: *FLASH CMD %dbit write %s", size * 8, getCmdName(value));
+			if ((value == SM_CMD_READ1 || value == SM_CMD_READ2 || value == SM_CMD_READ3 || value == SM_CMD_READID) &&
+				!(cmd == SM_CMD_READ1 || cmd == SM_CMD_READ2 || cmd == SM_CMD_READ3 || cmd == SM_CMD_READID))
+			{
+				logged_biexec_lookup_transition = false;
+				DevCon.WriteLn("DEV9: *FLASH transition into read lookup (prev=%s -> next=%s)", getCmdName(cmd), getCmdName(value));
+			}
 			switch (value)
 			{ // A8 bit is encoded in READ cmd;)
 				case SM_CMD_READ1:
@@ -262,6 +317,23 @@ void FLASHwrite32(u32 addr, u32 value, int size)
 					memcpy(data, file + (address >> PAGE_SIZE_BITS) * PAGE_SIZE_ECC, PAGE_SIZE);
 					calculateECC(data); // calculate ECC; should be in the file already
 					ctrl |= FLASH_PP_READY;
+					flash_read_sequence++;
+					logFlashReadWindow("READ PAGE SELECT");
+					if (!logged_biexec_lookup_transition)
+					{
+						const u32 blocks = address / BLOCK_SIZE;
+						const u32 block_offset = address - (blocks * BLOCK_SIZE);
+						const u32 pages = block_offset / PAGE_SIZE;
+						DevCon.WriteLn(
+							"DEV9: *FLASH BIEXEC lookup transition: flash_base=0x%08X selected_block=%u selected_page=%u address=0x%08lX",
+							FLASH_REGBASE, blocks, pages, address);
+						logged_biexec_lookup_transition = true;
+					}
+				}
+				else if (cmd == SM_CMD_READID)
+				{
+					counter = (address & 1) ? 1 : 0;
+					DevCon.WriteLn("DEV9: *FLASH READID pointer update address=0x%08lX -> counter=%u", address, counter);
 				}
 				addrbyte = 0; // address reset
 				{
