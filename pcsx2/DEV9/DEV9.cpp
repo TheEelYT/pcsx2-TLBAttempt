@@ -176,6 +176,7 @@ s32 DEV9init()
 void DEV9shutdown()
 {
 	DevCon.WriteLn("DEV9: DEV9shutdown");
+	FLASHSaveIfDirty("DEV9shutdown");
 	delete dev9.ata;
 }
 
@@ -201,6 +202,7 @@ s32 DEV9open()
 void DEV9close()
 {
 	DevCon.WriteLn("DEV9: DEV9close");
+	FLASHSaveIfDirty("DEV9close");
 
 	dev9.dma_iop_ptr = nullptr;
 	dev9.ata->Close();
