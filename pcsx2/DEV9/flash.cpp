@@ -81,6 +81,40 @@ static std::string BuildCandidateListForLog(const std::vector<std::string>& cand
 	return output;
 }
 
+
+static bool CreateErasedFlashImage(const std::string& path)
+{
+	const std::string flash_directory(Path::GetDirectory(path));
+	if (!flash_directory.empty() && !FileSystem::DirectoryExists(flash_directory.c_str()) &&
+		!FileSystem::CreateDirectoryPath(flash_directory.c_str(), false))
+	{
+		DevCon.Warning("DEV9: failed to auto-create flash image '%s': unable to create directory '%s'.",
+			path.c_str(), flash_directory.c_str());
+		return false;
+	}
+
+	FILE* fd = FileSystem::OpenCFile(path.c_str(), "wb");
+	if (fd == nullptr)
+	{
+		DevCon.Warning("DEV9: failed to auto-create flash image '%s': could not open file for write.",
+			path.c_str());
+		return false;
+	}
+
+	std::vector<u8> erased(CARD_SIZE_ECC, 0xFF);
+	const size_t written = fwrite(erased.data(), 1, erased.size(), fd);
+	fclose(fd);
+	if (written != erased.size())
+	{
+		DevCon.Warning("DEV9: failed to auto-create flash image '%s': wrote %zu of %zu bytes.",
+			path.c_str(), written, erased.size());
+		return false;
+	}
+
+	DevCon.WriteLn("DEV9: auto-created erased flash image at '%s'.", path.c_str());
+	return true;
+}
+
 static std::string GetFlashSavePath()
 {
 	const std::string configured_path = EmuConfig.DEV9.FlashFile.empty() ? "flash.dat" : EmuConfig.DEV9.FlashFile;
@@ -233,10 +267,54 @@ void FLASHinit()
 
 	if (!flash_file_loaded)
 	{
-		DevCon.Warning(
-			"DEV9: no flash backing file found. Place 'flash.dat' in the settings directory ('%s') or set DEV9/Hdd/FlashFile to an absolute or settings-relative path. Lookup attempted: %s. Using erased flash image (0xFF).",
-			EmuFolders::Settings.c_str(), BuildCandidateListForLog(flash_candidates).c_str());
-		memset(file, 0xFF, CARD_SIZE_ECC);
+		const std::string auto_create_path = ResolveAbsolutePath("flash.dat", EmuFolders::Settings);
+
+		if (EmuConfig.DEV9.FlashAutoCreate)
+		{
+			DevCon.Warning(
+				"DEV9: no flash backing file found. Attempting auto-create at '%s' (DEV9/Hdd/FlashAutoCreate=true). Lookup attempted: %s.",
+				auto_create_path.c_str(), BuildCandidateListForLog(flash_candidates).c_str());
+
+			if (CreateErasedFlashImage(auto_create_path))
+			{
+				FILE* fd = FileSystem::OpenCFile(auto_create_path.c_str(), "rb");
+				if (fd != nullptr)
+				{
+					const size_t ret = fread(file, 1, CARD_SIZE_ECC, fd);
+					fclose(fd);
+
+					if (ret == CARD_SIZE_ECC)
+					{
+						flash_file_loaded = true;
+						flash_save_path = auto_create_path;
+						DevCon.WriteLn("DEV9: reopened auto-created flash image from '%s'.", auto_create_path.c_str());
+					}
+					else
+					{
+						DevCon.Warning("DEV9: auto-created flash image '%s' had unexpected size on reopen (read=%zu expected=%u).",
+							auto_create_path.c_str(), ret, static_cast<unsigned>(CARD_SIZE_ECC));
+					}
+				}
+				else
+				{
+					DevCon.Warning("DEV9: auto-created flash image '%s' but failed to reopen it for read.", auto_create_path.c_str());
+				}
+			}
+		}
+		else
+		{
+			DevCon.Warning(
+				"DEV9: no flash backing file found and auto-create is disabled (DEV9/Hdd/FlashAutoCreate=false). Place 'flash.dat' in the settings directory ('%s') or set DEV9/Hdd/FlashFile to an absolute or settings-relative path. Lookup attempted: %s.",
+				EmuFolders::Settings.c_str(), BuildCandidateListForLog(flash_candidates).c_str());
+		}
+
+		if (!flash_file_loaded)
+		{
+			DevCon.Warning(
+				"DEV9: using erased in-memory flash fallback (0xFF). Ensure '%s' is writable or configure DEV9/Hdd/FlashFile to a writable path.",
+				auto_create_path.c_str());
+			memset(file, 0xFF, CARD_SIZE_ECC);
+		}
 	}
 }
 
