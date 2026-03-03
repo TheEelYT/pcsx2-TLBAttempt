@@ -299,10 +299,14 @@ namespace R3000A
 			(void)mode;
 			*file = nullptr;
 
-			if ((flags & IOP_O_WRONLY) || (flags & IOP_O_RDWR))
-				return -IOP_EROFS;
-
 			const std::string normalized = normalize_xfrom_path(full_path);
+			const s32 access_mode = (flags & IOP_O_RDWR);
+			if (access_mode == IOP_O_WRONLY || access_mode == IOP_O_RDWR)
+			{
+				Console.Warning("XFROM: coercing write-capable open flags=0x%X to read-only for normalized='%s'",
+					flags, normalized.c_str());
+			}
+
 			Console.WriteLn("XFROM: open request='%s' normalized='%s'", full_path.c_str(), normalized.c_str());
 
 			const std::string rel = normalized.substr(1);
