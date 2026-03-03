@@ -161,6 +161,8 @@ public:
 	ATA();
 	~ATA();
 
+	bool ReadBytesForXFrom(u64 offset, void* buffer, size_t size);
+
 	int Open(const std::string& hddPath);
 	void Close();
 

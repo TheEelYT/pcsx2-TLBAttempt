@@ -291,6 +291,31 @@ void ATA::Close()
 	readBuffer = nullptr;
 }
 
+
+bool ATA::ReadBytesForXFrom(u64 offset, void* buffer, size_t size)
+{
+	if (!hddImage || !buffer)
+		return false;
+	if (size == 0)
+		return true;
+	if (offset > hddImageSize || size > (hddImageSize - offset))
+		return false;
+
+	const s64 original_pos = FileSystem::FTell64(hddImage);
+	if (original_pos < 0)
+		return false;
+
+	if (FileSystem::FSeek64(hddImage, static_cast<s64>(offset), SEEK_SET) != 0)
+		return false;
+
+	const size_t read_size = std::fread(buffer, 1, size, hddImage);
+	const bool ok = (read_size == size);
+	if (FileSystem::FSeek64(hddImage, original_pos, SEEK_SET) != 0)
+		return false;
+
+	return ok;
+}
+
 void ATA::ResetBegin()
 {
 	PreCmdExecuteDeviceDiag();
