@@ -127,6 +127,7 @@ u32 FLASHread32(u32 addr, int size)
 	switch (addr)
 	{
 		case FLASH_R_DATA:
+		{
 			if (!flash_file_loaded && !warned_missing_flash_before_read)
 			{
 				DevCon.Warning("DEV9: *FLASH DATA read while flash image is missing; reads come from erased (0xFF) backing store.");
@@ -177,6 +178,7 @@ u32 FLASHread32(u32 addr, int size)
 			}
 
 			return value;
+		}
 
 		case FLASH_R_CMD:
 			DevCon.WriteLn("DEV9: *FLASH CMD %dbit read %s DENIED", size * 8, getCmdName(cmd));
