@@ -671,6 +671,7 @@ extern void dev9Irq(int cycles);
 
 void FLASHinit();
 void FLASHSaveIfDirty(const char* reason);
+bool FLASHReadBytesForXFrom(u32 offset, void* out, u32 size);
 s32 DEV9init();
 void DEV9close();
 s32 DEV9open();

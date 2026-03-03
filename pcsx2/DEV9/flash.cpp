@@ -180,6 +180,19 @@ void FLASHSaveIfDirty(const char* reason)
 	}
 }
 
+bool FLASHReadBytesForXFrom(u32 offset, void* out, u32 size)
+{
+	if (!out)
+		return false;
+
+	if (offset >= CARD_SIZE_ECC || size > (CARD_SIZE_ECC - offset))
+		return false;
+
+	memcpy(out, file + offset, size);
+	return true;
+}
+
+
 static void xfromman_call20_calculateXors(unsigned char buffer[128], unsigned char blah[4]);
 
 static void calculateECC(u8 page[PAGE_SIZE_ECC])

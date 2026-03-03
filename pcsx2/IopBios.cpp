@@ -9,6 +9,7 @@
 #include "R5900.h"
 #include "ps2/BiosTools.h"
 #include "VMManager.h"
+#include "DEV9/DEV9.h"
 
 #include <ctype.h>
 #include <fmt/format.h>
@@ -388,6 +389,213 @@ namespace R3000A
 			exists ? "exists" : "missing", source, candidate.c_str());
 	}
 
+
+	enum class XFromResolvedSource : u8
+	{
+		HddBacked = 0,
+		FlashBacked = 1,
+		HostFallback = 2,
+	};
+
+	static const char* xfrom_resolved_source_name(const XFromResolvedSource source)
+	{
+		switch (source)
+		{
+			case XFromResolvedSource::HddBacked:
+				return "HDD-backed xfrom";
+			case XFromResolvedSource::FlashBacked:
+				return "flash-backed xfrom";
+			case XFromResolvedSource::HostFallback:
+				return "host fallback";
+			default:
+				return "unknown";
+		}
+	}
+
+	static void xfrom_log_biexec_source_once(const std::string_view path, const XFromResolvedSource source)
+	{
+		if (!is_biexec_elf_path(path))
+			return;
+
+		static std::unordered_set<std::string> s_logged;
+		const std::string key = fmt::format("{}:{}", std::string(path), static_cast<int>(source));
+		if (!s_logged.emplace(key).second)
+			return;
+
+		Console.WriteLn("XFROM: BIEXEC source path='%.*s' resolved_via=%s",
+			static_cast<int>(path.size()), path.data(), xfrom_resolved_source_name(source));
+	}
+
+	static bool iequals_ascii_char(const char a, const char b)
+	{
+		return static_cast<char>(std::tolower(static_cast<unsigned char>(a))) ==
+			static_cast<char>(std::tolower(static_cast<unsigned char>(b)));
+	}
+
+	static bool find_case_insensitive_in_blob(const std::vector<u8>& blob, const std::string_view needle, size_t* out_pos)
+	{
+		if (needle.empty() || blob.size() < needle.size())
+			return false;
+
+		for (size_t i = 0; i + needle.size() <= blob.size(); i++)
+		{
+			bool match = true;
+			for (size_t j = 0; j < needle.size(); j++)
+			{
+				if (!iequals_ascii_char(static_cast<char>(blob[i + j]), needle[j]))
+				{
+					match = false;
+					break;
+				}
+			}
+			if (match)
+			{
+				*out_pos = i;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static u16 read_le16(const std::vector<u8>& data, const size_t off)
+	{
+		return static_cast<u16>(data[off] | (data[off + 1] << 8));
+	}
+
+	static u32 read_le32(const std::vector<u8>& data, const size_t off)
+	{
+		return static_cast<u32>(data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) | (data[off + 3] << 24));
+	}
+
+	static bool try_extract_elf_payload(const std::vector<u8>& blob, const std::string_view file_name, std::vector<u8>* out)
+	{
+		size_t file_tag_pos = 0;
+		if (!find_case_insensitive_in_blob(blob, file_name, &file_tag_pos))
+			return false;
+
+		const size_t begin = (file_tag_pos > (2 * 1024 * 1024)) ? (file_tag_pos - (2 * 1024 * 1024)) : 0;
+		const size_t end = std::min(blob.size(), file_tag_pos + (2 * 1024 * 1024));
+		for (size_t i = begin; i + 0x34 < end; i++)
+		{
+			if (blob[i] != 0x7F || blob[i + 1] != 'E' || blob[i + 2] != 'L' || blob[i + 3] != 'F')
+				continue;
+			if (blob[i + 4] != 1 || blob[i + 5] != 1)
+				continue;
+
+			const u32 phoff = read_le32(blob, i + 0x1C);
+			const u16 phentsize = read_le16(blob, i + 0x2A);
+			const u16 phnum = read_le16(blob, i + 0x2C);
+			if (phentsize == 0 || phnum == 0)
+				continue;
+
+			u64 elf_size = 0x34;
+			for (u16 p = 0; p < phnum; p++)
+			{
+				const u64 ph = static_cast<u64>(i) + phoff + static_cast<u64>(p) * phentsize;
+				if (ph + 0x18 >= blob.size())
+					return false;
+
+				const u32 p_offset = read_le32(blob, static_cast<size_t>(ph + 0x04));
+				const u32 p_filesz = read_le32(blob, static_cast<size_t>(ph + 0x10));
+				elf_size = std::max<u64>(elf_size, static_cast<u64>(p_offset) + p_filesz);
+			}
+
+			if (i + elf_size > blob.size())
+				continue;
+
+			out->assign(blob.begin() + i, blob.begin() + i + static_cast<size_t>(elf_size));
+			return true;
+		}
+
+		return false;
+	}
+
+	static bool try_read_xfrom_from_hdd(const std::string_view file_name, std::vector<u8>* out)
+	{
+		if (!dev9.ata)
+			return false;
+
+		constexpr size_t kMaxScanBytes = 64 * 1024 * 1024;
+		constexpr size_t kChunkSize = 1 * 1024 * 1024;
+		std::vector<u8> blob;
+		blob.resize(kMaxScanBytes);
+		size_t filled = 0;
+		for (; filled < kMaxScanBytes; filled += kChunkSize)
+		{
+			const size_t to_read = std::min(kChunkSize, kMaxScanBytes - filled);
+			if (!dev9.ata->ReadBytesForXFrom(static_cast<u64>(filled), blob.data() + filled, to_read))
+				break;
+		}
+		blob.resize(filled);
+		if (blob.empty())
+			return false;
+
+		return try_extract_elf_payload(blob, file_name, out);
+	}
+
+	static bool try_read_xfrom_from_flash(const std::string_view file_name, std::vector<u8>* out)
+	{
+		constexpr size_t kFlashSize = 1024 * 16 * (512 + 16);
+		std::vector<u8> blob(kFlashSize);
+		if (!FLASHReadBytesForXFrom(0, blob.data(), static_cast<u32>(blob.size())))
+			return false;
+
+		return try_extract_elf_payload(blob, file_name, out);
+	}
+
+	class XFromBlobFile final : public IOManFile
+	{
+	public:
+		XFromBlobFile(std::vector<u8> data, std::string path, XFromResolvedSource source)
+			: bytes(std::move(data))
+			, resolved_path(std::move(path))
+			, source_kind(source)
+		{
+		}
+
+		void close() override {}
+
+		int lseek(s32 offset, s32 whence) override
+		{
+			s32 next = position;
+			switch (whence)
+			{
+				case SEEK_SET:
+					next = offset;
+					break;
+				case SEEK_CUR:
+					next += offset;
+					break;
+				case SEEK_END:
+					next = static_cast<s32>(bytes.size()) + offset;
+					break;
+				default:
+					return -IOP_EIO;
+			}
+			if (next < 0)
+				return -IOP_EIO;
+			position = next;
+			return position;
+		}
+
+		int read(void* buf, u32 count) override
+		{
+			const size_t available = (position >= 0 && static_cast<size_t>(position) < bytes.size()) ? (bytes.size() - static_cast<size_t>(position)) : 0;
+			const size_t to_copy = std::min<size_t>(available, count);
+			if (to_copy > 0)
+				memcpy(buf, bytes.data() + position, to_copy);
+			position += static_cast<s32>(to_copy);
+			return static_cast<int>(to_copy);
+		}
+
+	private:
+		std::vector<u8> bytes;
+		s32 position = 0;
+		std::string resolved_path;
+		XFromResolvedSource source_kind;
+	};
+
 	class XFromFile final : public IOManFile
 	{
 	public:
@@ -406,6 +614,24 @@ namespace R3000A
 			}
 
 			Console.WriteLn("XFROM: open request='%s' normalized='%s'", full_path.c_str(), normalized.c_str());
+
+			if (is_biexec_elf)
+			{
+				const std::string file_name = Path::GetFileName(normalized);
+				std::vector<u8> image;
+				if (try_read_xfrom_from_hdd(file_name, &image))
+				{
+					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::HddBacked);
+					*file = new XFromBlobFile(std::move(image), full_path, XFromResolvedSource::HddBacked);
+					return 0;
+				}
+				if (try_read_xfrom_from_flash(file_name, &image))
+				{
+					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::FlashBacked);
+					*file = new XFromBlobFile(std::move(image), full_path, XFromResolvedSource::FlashBacked);
+					return 0;
+				}
+			}
 
 			const std::string rel = normalized.substr(1);
 			std::vector<std::pair<const char*, std::string>> candidates;
@@ -472,6 +698,8 @@ namespace R3000A
 					continue;
 
 				Console.WriteLn("XFROM: resolved='%s' mount/source='%s'", candidate.c_str(), source);
+				if (is_biexec_elf)
+					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::HostFallback);
 				*file = new XFromFile(fd, candidate, source);
 				return 0;
 			}
