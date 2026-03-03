@@ -1791,6 +1791,7 @@ void VMManager::Reset()
 	memBindConditionalHandlers();
 	SysMemory::Reset();
 	cpuReset();
+	FLASHSaveIfDirty("VM reset");
 	hwReset();
 
 	if (g_InputRecording.isActive())

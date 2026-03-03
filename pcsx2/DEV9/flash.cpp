@@ -27,7 +27,11 @@ static u8 data[PAGE_SIZE_ECC], file[CARD_SIZE_ECC];
 static bool flash_file_loaded = false;
 static bool warned_missing_flash_before_read = false;
 static bool logged_biexec_lookup_transition = false;
+static bool flash_dirty = false;
+static bool flash_save_success_logged = false;
+static bool flash_save_failure_logged = false;
 static u32 flash_read_sequence = 0;
+static std::string flash_save_path;
 
 static std::string ResolveAbsolutePath(const std::string& path, const std::string& relative_to)
 {
@@ -75,6 +79,71 @@ static std::string BuildCandidateListForLog(const std::vector<std::string>& cand
 		output += candidates[i];
 	}
 	return output;
+}
+
+static std::string GetFlashSavePath()
+{
+	const std::string configured_path = EmuConfig.DEV9.FlashFile.empty() ? "flash.dat" : EmuConfig.DEV9.FlashFile;
+	if (Path::IsAbsolute(configured_path))
+		return Path::Canonicalize(configured_path);
+
+	return ResolveAbsolutePath(configured_path, EmuFolders::Settings);
+}
+
+void FLASHSaveIfDirty(const char* reason)
+{
+	if (!flash_dirty)
+		return;
+
+	if (flash_save_path.empty())
+		flash_save_path = GetFlashSavePath();
+
+	const std::string flash_directory(Path::GetDirectory(flash_save_path));
+	if (!flash_directory.empty() && !FileSystem::DirectoryExists(flash_directory.c_str()) &&
+		!FileSystem::CreateDirectoryPath(flash_directory.c_str(), false))
+	{
+		if (!flash_save_failure_logged)
+		{
+			DevCon.Warning("DEV9: failed to save flash image on %s to '%s': unable to create directory '%s'.",
+				reason, flash_save_path.c_str(), flash_directory.c_str());
+			flash_save_failure_logged = true;
+		}
+		return;
+	}
+
+	FILE* fd = FileSystem::OpenCFile(flash_save_path.c_str(), "wb");
+	if (fd == nullptr)
+	{
+		if (!flash_save_failure_logged)
+		{
+			DevCon.Warning("DEV9: failed to save flash image on %s to '%s': could not open file for write.",
+				reason, flash_save_path.c_str());
+			flash_save_failure_logged = true;
+		}
+		return;
+	}
+
+	const size_t written = fwrite(file, 1, CARD_SIZE_ECC, fd);
+	fclose(fd);
+	if (written != CARD_SIZE_ECC)
+	{
+		if (!flash_save_failure_logged)
+		{
+			DevCon.Warning("DEV9: failed to save flash image on %s to '%s': wrote %zu of %u bytes.",
+				reason, flash_save_path.c_str(), written, static_cast<unsigned>(CARD_SIZE_ECC));
+			flash_save_failure_logged = true;
+		}
+		return;
+	}
+
+	flash_dirty = false;
+	flash_file_loaded = true;
+	if (!flash_save_success_logged)
+	{
+		DevCon.WriteLn("DEV9: saved flash image (%u bytes) to '%s' on %s.",
+			static_cast<unsigned>(CARD_SIZE_ECC), flash_save_path.c_str(), reason);
+		flash_save_success_logged = true;
+	}
 }
 
 static void xfromman_call20_calculateXors(unsigned char buffer[128], unsigned char blah[4]);
@@ -130,7 +199,11 @@ void FLASHinit()
 	flash_file_loaded = false;
 	warned_missing_flash_before_read = false;
 	logged_biexec_lookup_transition = false;
+	flash_dirty = false;
+	flash_save_success_logged = false;
+	flash_save_failure_logged = false;
 	flash_read_sequence = 0;
+	flash_save_path = GetFlashSavePath();
 
 	const std::vector<std::string> flash_candidates = GetFlashCandidatePaths();
 	const std::string configured_flash = EmuConfig.DEV9.FlashFile.empty() ? "flash.dat" : EmuConfig.DEV9.FlashFile;
@@ -356,8 +429,9 @@ void FLASHwrite32(u32 addr, u32 value, int size)
 					ctrl &= ~FLASH_PP_READY;
 					calculateECC(data);
 					memcpy(file + (address / PAGE_SIZE) * PAGE_SIZE_ECC, data, PAGE_SIZE_ECC);
-					/*write2file*/
+					flash_dirty = true;
 					ctrl |= FLASH_PP_READY;
+					FLASHSaveIfDirty("write-complete");
 					break;
 				case SM_CMD_GETSTATUS:
 					break;
