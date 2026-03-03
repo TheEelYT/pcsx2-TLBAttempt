@@ -241,6 +241,13 @@ namespace R3000A
 
 	static constexpr int XFROM_GENERIC_FAILURE = -31;
 
+	enum class XFromOperation : u8
+	{
+		Open = 0,
+		Read = 1,
+		LSeek = 2,
+	};
+
 	static const char* xfrom_error_reason(const int err)
 	{
 		switch (err)
@@ -256,6 +263,84 @@ namespace R3000A
 			default:
 				return "unmapped/unknown";
 		}
+	}
+
+	static const char* xfrom_operation_name(const XFromOperation op)
+	{
+		switch (op)
+		{
+			case XFromOperation::Open:
+				return "open";
+			case XFromOperation::Read:
+				return "read";
+			case XFromOperation::LSeek:
+				return "lseek";
+			default:
+				return "unknown";
+		}
+	}
+
+	static bool is_biexec_elf_filename(const std::string_view filename)
+	{
+		return iequals_ascii(filename, "osd180.elf") || iequals_ascii(filename, "osdmain.elf");
+	}
+
+	static bool is_biexec_elf_path(const std::string_view full_path)
+	{
+		if (!starts_with_case_insensitive(full_path, "xfrom:/BIEXEC-SYSTEM/"))
+			return false;
+
+		return is_biexec_elf_filename(Path::GetFileName(std::string(full_path)));
+	}
+
+	static int xfrom_export_error(const int internal_err, const bool biexec_path)
+	{
+		if (internal_err >= 0)
+			return internal_err;
+
+		if (internal_err == XFROM_GENERIC_FAILURE)
+			return XFROM_GENERIC_FAILURE;
+
+		// BIOS/XFROMMAN expects a generic failure on BIEXEC loads for several host-facing errors.
+		if (biexec_path)
+		{
+			switch (internal_err)
+			{
+				case -IOP_EROFS:
+				case -IOP_ENOENT:
+				case -IOP_ENODEV:
+				case -IOP_EACCES:
+				case -IOP_EISDIR:
+				case -IOP_EIO:
+					return XFROM_GENERIC_FAILURE;
+				default:
+					break;
+			}
+		}
+
+		return internal_err;
+	}
+
+	static void xfrom_log_biexec_error_once(const XFromOperation op, const std::string_view path, const int internal_err, const int exported_err)
+	{
+		if (!is_biexec_elf_filename(Path::GetFileName(std::string(path))))
+			return;
+
+		constexpr size_t kTrackedFileCount = 2;
+		constexpr size_t kTrackedOperationCount = 3;
+		static std::array<std::array<bool, kTrackedOperationCount>, kTrackedFileCount> logged{};
+
+		const std::string_view file_name = Path::GetFileName(std::string(path));
+		const size_t file_index = iequals_ascii(file_name, "osd180.elf") ? 0 : 1;
+		const size_t op_index = static_cast<size_t>(op);
+		if (logged[file_index][op_index])
+			return;
+
+		logged[file_index][op_index] = true;
+		Console.Warning(
+			"XFROM: BIEXEC %s failure one-shot file='%.*s' internal=%d (%s) exported=%d (%s)",
+			xfrom_operation_name(op), static_cast<int>(file_name.size()), file_name.data(), internal_err, xfrom_error_reason(internal_err), exported_err,
+			xfrom_error_reason(exported_err));
 	}
 
 	static __fi int translate_host_errno_to_iop(const int err)
@@ -300,6 +385,7 @@ namespace R3000A
 			*file = nullptr;
 
 			const std::string normalized = normalize_xfrom_path(full_path);
+			const bool is_biexec_elf = is_biexec_elf_path(full_path);
 			const s32 access_mode = (flags & IOP_O_RDWR);
 			if (access_mode == IOP_O_WRONLY || access_mode == IOP_O_RDWR)
 			{
@@ -331,9 +417,12 @@ namespace R3000A
 				return 0;
 			}
 
-			Console.Warning("XFROM: failed to resolve '%s' (normalized '%s'). Returning %d (%s)",
-				full_path.c_str(), normalized.c_str(), XFROM_GENERIC_FAILURE, xfrom_error_reason(XFROM_GENERIC_FAILURE));
-			return XFROM_GENERIC_FAILURE;
+			const int internal_err = -IOP_ENOENT;
+			const int exported_err = xfrom_export_error(internal_err, is_biexec_elf);
+			Console.Warning("XFROM: failed to resolve '%s' (normalized '%s'). internal=%d (%s) exported=%d (%s)",
+				full_path.c_str(), normalized.c_str(), internal_err, xfrom_error_reason(internal_err), exported_err, xfrom_error_reason(exported_err));
+			xfrom_log_biexec_error_once(XFromOperation::Open, full_path, internal_err, exported_err);
+			return exported_err;
 		}
 
 		XFromFile(const int xfd, std::string path, std::string source)
@@ -353,10 +442,18 @@ namespace R3000A
 
 		int lseek(s32 offset, s32 whence) override
 		{
-			const int err = static_cast<int>(::lseek(fd, offset, whence));
-			if (err >= 0)
-				position = err;
-			return translate_host_errno_to_iop(err);
+			const int ret = static_cast<int>(::lseek(fd, offset, whence));
+			if (ret >= 0)
+			{
+				position = ret;
+				return ret;
+			}
+
+			const int internal_err = translate_host_errno_to_iop(ret);
+			const bool is_biexec_elf = is_biexec_elf_filename(Path::GetFileName(resolved_path));
+			const int exported_err = xfrom_export_error(internal_err, is_biexec_elf);
+			xfrom_log_biexec_error_once(XFromOperation::LSeek, resolved_path, internal_err, exported_err);
+			return exported_err;
 		}
 
 		int read(void* buf, u32 count) override
@@ -364,14 +461,17 @@ namespace R3000A
 			const int before = position;
 			const int ret = static_cast<int>(::read(fd, buf, count));
 			const int mapped = translate_host_errno_to_iop(ret);
+			const bool is_biexec_elf = is_biexec_elf_filename(Path::GetFileName(resolved_path));
+			const int exported = xfrom_export_error(mapped, is_biexec_elf);
 			if (ret > 0)
 				position += ret;
 
 			const u32 sector = static_cast<u32>(before >= 0 ? (before / 512) : 0);
 			const u32 page = static_cast<u32>(before >= 0 ? (before / 512) : 0);
 			Console.WriteLn(
-				"XFROM: read resolved='%s' source='%s' before=%d count=%u -> ret=%d mapped=%d (%s), sector=%u page=%u",
-				resolved_path.c_str(), selected_source.c_str(), before, count, ret, mapped, xfrom_error_reason(mapped), sector, page);
+				"XFROM: read resolved='%s' source='%s' before=%d count=%u -> ret=%d internal=%d (%s) exported=%d (%s), sector=%u page=%u",
+				resolved_path.c_str(), selected_source.c_str(), before, count, ret, mapped, xfrom_error_reason(mapped), exported,
+				xfrom_error_reason(exported), sector, page);
 
 			if (ret > 0 && (Path::GetFileName(resolved_path) == "osd180.elf" || Path::GetFileName(resolved_path) == "osdmain.elf"))
 			{
@@ -379,9 +479,10 @@ namespace R3000A
 				Console.WriteLn("XFROM: BIEXEC ELF read succeeded (%s, bytes=%d).", Path::GetFileName(resolved_path), ret);
 			}
 
-			if (ret < 0 && mapped == -IOP_ENOENT)
-				return XFROM_GENERIC_FAILURE;
-			return mapped;
+			if (ret < 0)
+				xfrom_log_biexec_error_once(XFromOperation::Read, resolved_path, mapped, exported);
+
+			return exported;
 		}
 
 	private:
