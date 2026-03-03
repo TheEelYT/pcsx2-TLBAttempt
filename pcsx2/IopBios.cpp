@@ -258,6 +258,25 @@ namespace R3000A
 		}
 	}
 
+	static __fi int translate_host_errno_to_iop(const int err)
+	{
+		if (err >= 0)
+			return err;
+
+		switch (err)
+		{
+			case -ENOENT:
+				return -IOP_ENOENT;
+			case -EACCES:
+				return -IOP_EACCES;
+			case -EISDIR:
+				return -IOP_EISDIR;
+			case -EIO:
+			default:
+				return -IOP_EIO;
+		}
+	}
+
 	static std::string normalize_xfrom_path(const std::string_view full_path)
 	{
 		const size_t colon = full_path.find(':');
@@ -333,14 +352,14 @@ namespace R3000A
 			const int err = static_cast<int>(::lseek(fd, offset, whence));
 			if (err >= 0)
 				position = err;
-			return HostFile::translate_error(err);
+			return translate_host_errno_to_iop(err);
 		}
 
 		int read(void* buf, u32 count) override
 		{
 			const int before = position;
 			const int ret = static_cast<int>(::read(fd, buf, count));
-			const int mapped = HostFile::translate_error(ret);
+			const int mapped = translate_host_errno_to_iop(ret);
 			if (ret > 0)
 				position += ret;
 
@@ -388,21 +407,7 @@ namespace R3000A
 
 		static __fi int translate_error(int err)
 		{
-			if (err >= 0)
-				return err;
-
-			switch (err)
-			{
-				case -ENOENT:
-					return -IOP_ENOENT;
-				case -EACCES:
-					return -IOP_EACCES;
-				case -EISDIR:
-					return -IOP_EISDIR;
-				case -EIO:
-				default:
-					return -IOP_EIO;
-			}
+			return translate_host_errno_to_iop(err);
 		}
 
 		static int open(IOManFile** file, const std::string& full_path, s32 flags, u16 mode)
