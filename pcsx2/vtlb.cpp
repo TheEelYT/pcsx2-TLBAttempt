@@ -23,6 +23,7 @@
 #include "IopMem.h"
 #include "Host.h"
 #include "VMManager.h"
+#include "DebugTools/Debug.h"
 
 #include "common/BitUtils.h"
 #include "common/Error.h"
@@ -35,6 +36,7 @@
 #include <map>
 #include <unordered_set>
 #include <unordered_map>
+#include <string_view>
 
 #define FASTMEM_LOG(...)
 //#define FASTMEM_LOG(...) Console.WriteLn(__VA_ARGS__)
@@ -84,6 +86,123 @@ static std::vector<u32> s_fastmem_virtual_mapping; // maps vaddr -> mainmem offs
 static std::unordered_multimap<u32, u32> s_fastmem_physical_mapping; // maps mainmem offset -> vaddr
 static std::unordered_map<uptr, LoadstoreBackpatchInfo> s_fastmem_backpatch_info;
 static std::unordered_set<u32> s_fastmem_faulting_pcs;
+
+struct VTLBFaultLogState
+{
+	u32 burst_count = 0;
+	u32 suppressed_count = 0;
+	u32 pc = 0;
+	u32 addr = 0;
+	u32 badvaddr = 0;
+	u32 entryhi = 0;
+	u32 context = 0;
+	u8 mode = 0;
+	bool branch = false;
+};
+
+static VTLBFaultLogState s_vtlb_miss_log_state;
+static VTLBFaultLogState s_vtlb_bus_error_log_state;
+
+static constexpr u32 VTLB_FAULT_LOG_BURST_LIMIT = 8;
+static constexpr u32 VTLB_FAULT_LOG_SUMMARY_INTERVAL = 1024;
+
+static bool vtlb_ShouldLogCompact()
+{
+	return IsDevBuild || EmuConfig.Trace.Enabled;
+}
+
+static bool vtlb_ShouldLogVerbose()
+{
+	return EmuConfig.Trace.Enabled && TraceLogging.EE.TLBMMU.Enabled;
+}
+
+static const char* vtlb_AccessModeToString(u32 mode)
+{
+	return mode ? "store" : "load";
+}
+static const char* vtlb_PageProtectionToString(const PageProtectionMode& mode)
+{
+	if (mode.CanRead() && mode.CanWrite() && mode.CanExecute())
+		return "rwx";
+	if (mode.CanRead() && mode.CanWrite())
+		return "rw";
+	if (mode.CanRead() && mode.CanExecute())
+		return "rx";
+	if (mode.CanRead())
+		return "r";
+	if (mode.CanWrite())
+		return "w";
+	if (mode.CanExecute())
+		return "x";
+	return "none";
+}
+
+
+static void vtlb_LogEventCompact(std::string_view event, std::string_view details)
+{
+	if (!vtlb_ShouldLogCompact())
+		return;
+
+	DevCon.WriteLn("[vtlb][%.*s] %.*s", static_cast<int>(event.size()), event.data(), static_cast<int>(details.size()), details.data());
+}
+
+static void vtlb_LogEventVerbose(std::string_view event, const std::string& details)
+{
+	if (!vtlb_ShouldLogVerbose())
+		return;
+
+	DevCon.WriteLn("[vtlb][%.*s][verbose] %s", static_cast<int>(event.size()), event.data(), details.c_str());
+}
+
+static void vtlb_LogCpuStateSnapshot(std::string_view event, u32 addr, u32 mode)
+{
+	VTLBFaultLogState& state = (event == "miss") ? s_vtlb_miss_log_state : s_vtlb_bus_error_log_state;
+	const bool same_fault = (state.pc == cpuRegs.pc && state.addr == addr && state.mode == mode && state.branch == cpuRegs.branch &&
+		state.badvaddr == cpuRegs.CP0.n.BadVAddr && state.entryhi == cpuRegs.CP0.n.EntryHi && state.context == cpuRegs.CP0.n.Context);
+
+	if (same_fault)
+	{
+		if (state.burst_count >= VTLB_FAULT_LOG_BURST_LIMIT)
+		{
+			state.suppressed_count++;
+			if ((state.suppressed_count % VTLB_FAULT_LOG_SUMMARY_INTERVAL) == 0)
+			{
+				vtlb_LogEventCompact(event, fmt::format("suppressed={} repeated_fault pc={:08X} bd={} access={} vaddr={:08X}",
+					state.suppressed_count, state.pc, state.branch ? 1 : 0, vtlb_AccessModeToString(mode), state.addr));
+			}
+			return;
+		}
+
+		state.burst_count++;
+	}
+	else
+	{
+		if (state.suppressed_count != 0)
+		{
+			vtlb_LogEventCompact(event, fmt::format("suppressed={} repeated_fault pc={:08X} bd={} access={} vaddr={:08X}",
+				state.suppressed_count, state.pc, state.branch ? 1 : 0, vtlb_AccessModeToString(state.mode), state.addr));
+		}
+
+		state.pc = cpuRegs.pc;
+		state.addr = addr;
+		state.badvaddr = cpuRegs.CP0.n.BadVAddr;
+		state.entryhi = cpuRegs.CP0.n.EntryHi;
+		state.context = cpuRegs.CP0.n.Context;
+		state.mode = static_cast<u8>(mode);
+		state.branch = cpuRegs.branch;
+		state.burst_count = 1;
+		state.suppressed_count = 0;
+	}
+
+	const std::string compact = fmt::format("pc={:08X} bd={} access={} vaddr={:08X}",
+		cpuRegs.pc, cpuRegs.branch ? 1 : 0, vtlb_AccessModeToString(mode), addr);
+	vtlb_LogEventCompact(event, compact);
+
+	vtlb_LogEventVerbose(event, fmt::format(
+		"cpu_state={{pc:0x{:08X}, branch_delay:{}, access:{}, BadVAddr:0x{:08X}, EntryHi:0x{:08X}, Context:0x{:08X}}}",
+		cpuRegs.pc, cpuRegs.branch ? "true" : "false", vtlb_AccessModeToString(mode),
+		cpuRegs.CP0.n.BadVAddr, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.Context));
+}
 
 vtlb_private::VTLBPhysical vtlb_private::VTLBPhysical::fromPointer(sptr ptr)
 {
@@ -513,12 +632,15 @@ void GoemonUnloadTlb(u32 key)
 // Generates a tlbMiss Exception
 static __ri void vtlb_Miss(u32 addr, u32 mode)
 {
+	vtlb_LogCpuStateSnapshot("miss", addr, mode);
+
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		GoemonTlbMissDebug();
 
 	// Hack to handle expected tlb miss by some games.
 	if (Cpu == &intCpu)
 	{
+		vtlb_LogEventVerbose("miss", "Dispatching through interpreter exception path");
 		if (mode)
 			cpuTlbMissW(addr, cpuRegs.branch);
 		else
@@ -530,6 +652,7 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 	}
 
 	const std::string message(fmt::format("TLB Miss, pc=0x{:x} addr=0x{:x} [{}]", cpuRegs.pc, addr, mode ? "store" : "load"));
+	vtlb_LogEventVerbose("miss", fmt::format("Dispatching through recompiler exception path message='{}'", message));
 	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
 		// Pause, let the user try to figure out what went wrong in the debugger.
@@ -549,6 +672,9 @@ static __ri void vtlb_Miss(u32 addr, u32 mode)
 // time of the exception.
 static __ri void vtlb_BusError(u32 addr, u32 mode)
 {
+	vtlb_LogCpuStateSnapshot("bus_error", addr, mode);
+	vtlb_LogEventVerbose("bus_error", "Raising bus error exception path");
+
 	const std::string message(fmt::format("Bus Error, addr=0x{:x} [{}]", addr, mode ? "store" : "load"));
 	if (EmuConfig.Cpu.Recompiler.PauseOnTLBMiss)
 	{
@@ -918,6 +1044,9 @@ static bool vtlb_GetMainMemoryOffset(u32 paddr, u32* mainmem_offset, u32* mainme
 static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageProtectionMode& mode)
 {
 	FASTMEM_LOG("Create fastmem mapping @ vaddr %08X mainmem %08X", vaddr, mainmem_offset);
+	vtlb_LogEventCompact("fastmem_map", fmt::format("create vaddr={:08X} mainmem={:08X} prot={}", vaddr, mainmem_offset, vtlb_PageProtectionToString(mode)));
+	vtlb_LogEventVerbose("fastmem_map", fmt::format("create_mapping={{vaddr:0x{:08X}, mainmem_offset:0x{:08X}, host_page:0x{:08X}, protection:{}}}",
+		vaddr, mainmem_offset, vtlb_HostAlignOffset(vaddr), vtlb_PageProtectionToString(mode)));
 
 	const u32 page = vaddr / VTLB_PAGE_SIZE;
 
@@ -973,6 +1102,9 @@ static void vtlb_RemoveFastmemMapping(u32 vaddr)
 	const u32 mainmem_offset = s_fastmem_virtual_mapping[page];
 	const bool was_coalesced = vtlb_IsHostCoalesced(page);
 	FASTMEM_LOG("Remove fastmem mapping @ vaddr %08X mainmem %08X", vaddr, mainmem_offset);
+	vtlb_LogEventCompact("fastmem_map", fmt::format("remove vaddr={:08X} mainmem={:08X}", vaddr, mainmem_offset));
+	vtlb_LogEventVerbose("fastmem_map", fmt::format("remove_mapping={{vaddr:0x{:08X}, mainmem_offset:0x{:08X}, host_page:0x{:08X}}}",
+		vaddr, mainmem_offset, vtlb_HostAlignOffset(vaddr)));
 	s_fastmem_virtual_mapping[page] = NO_FASTMEM_MAPPING;
 
 	if (was_coalesced && !s_fastmem_area->Unmap(s_fastmem_area->PagePointer(vtlb_HostPage(page)), __pagesize))
@@ -1142,6 +1274,11 @@ bool vtlb_IsFaultingPC(u32 guest_pc)
 //TODO: Add invalid paddr checks
 void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 {
+	const u32 original_vaddr = vaddr;
+	const u32 original_paddr = paddr;
+	const u32 original_size = size;
+	vtlb_LogEventCompact("vmap", fmt::format("begin vaddr={:08X} paddr={:08X} size={:X}", original_vaddr, original_paddr, original_size));
+	vtlb_LogEventVerbose("vmap", fmt::format("begin_mapping={{vaddr:0x{:08X}, paddr:0x{:08X}, size:0x{:X}}}", original_vaddr, original_paddr, original_size));
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (paddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
@@ -1172,6 +1309,9 @@ void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 			vmv = VTLBVirtual(vtlbdata.pmap[paddr >> VTLB_PAGE_BITS], paddr, vaddr);
 
 		vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS] = vmv;
+		vtlb_LogEventVerbose("vmap", fmt::format("page={{vaddr:0x{:08X}, paddr:0x{:08X}, target:{}, handler_id:{}}}",
+			vaddr, paddr, vmv.isHandler(vaddr) ? "handler" : "memory",
+			vmv.isHandler(vaddr) ? static_cast<u32>(vmv.assumeHandlerGetID()) : 0u));
 		if (vtlbdata.ppmap)
 		{
 			if (!(vaddr & 0x80000000)) // those address are already physical don't change them
@@ -1182,10 +1322,16 @@ void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 		paddr += VTLB_PAGE_SIZE;
 		size -= VTLB_PAGE_SIZE;
 	}
+
+	vtlb_LogEventCompact("vmap", fmt::format("end vaddr={:08X} paddr={:08X} size={:X}", original_vaddr, original_paddr, original_size));
 }
 
 void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 {
+	const u32 original_vaddr = vaddr;
+	const u32 original_size = size;
+	vtlb_LogEventCompact("vmap_buffer", fmt::format("begin vaddr={:08X} size={:X} target=ptr", original_vaddr, original_size));
+	vtlb_LogEventVerbose("vmap_buffer", fmt::format("begin_mapping={{vaddr:0x{:08X}, size:0x{:X}, buffer:0x{:X}}}", original_vaddr, original_size, static_cast<u64>(reinterpret_cast<uptr>(buffer))));
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
 
@@ -1209,14 +1355,21 @@ void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 	while (size > 0)
 	{
 		vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS] = VTLBVirtual::fromPointer(bu8, vaddr);
+		vtlb_LogEventVerbose("vmap_buffer", fmt::format("page={{vaddr:0x{:08X}, target:memory_ptr, host_ptr:0x{:X}}}",
+			vaddr, static_cast<u64>(bu8)));
 		vaddr += VTLB_PAGE_SIZE;
 		bu8 += VTLB_PAGE_SIZE;
 		size -= VTLB_PAGE_SIZE;
 	}
+
+	vtlb_LogEventCompact("vmap_buffer", fmt::format("end vaddr={:08X} size={:X}", original_vaddr, original_size));
 }
 
 void vtlb_VMapUnmap(u32 vaddr, u32 size)
 {
+	const u32 original_vaddr = vaddr;
+	const u32 original_size = size;
+	vtlb_LogEventCompact("vmap_unmap", fmt::format("begin vaddr={:08X} size={:X}", original_vaddr, original_size));
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
 
@@ -1225,9 +1378,13 @@ void vtlb_VMapUnmap(u32 vaddr, u32 size)
 	while (size > 0)
 	{
 		vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS] = VTLBVirtual(VTLBPhysical::fromHandler(UnmappedVirtHandler), vaddr, vaddr);
+		vtlb_LogEventVerbose("vmap_unmap", fmt::format("page={{vaddr:0x{:08X}, target:handler, handler_id:{}}}",
+			vaddr, static_cast<u32>(UnmappedVirtHandler)));
 		vaddr += VTLB_PAGE_SIZE;
 		size -= VTLB_PAGE_SIZE;
 	}
+
+	vtlb_LogEventCompact("vmap_unmap", fmt::format("end vaddr={:08X} size={:X}", original_vaddr, original_size));
 }
 
 // vtlb_Init -- Clears vtlb handlers and memory mappings.
@@ -1271,9 +1428,13 @@ void vtlb_Init()
 // This function should probably be part of the COP0 rather than here in VTLB.
 void vtlb_Reset()
 {
+	vtlb_LogEventCompact("reset", "begin");
+	s_vtlb_miss_log_state = {};
+	s_vtlb_bus_error_log_state = {};
 	vtlb_RemoveFastmemMappings();
 	for (int i = 0; i < 48; i++)
 		UnmapTLB(tlb[i], i);
+	vtlb_LogEventCompact("reset", "end");
 }
 
 void vtlb_Shutdown()
@@ -1286,13 +1447,17 @@ void vtlb_Shutdown()
 void vtlb_ResetFastmem()
 {
 	DevCon.WriteLn("Resetting fastmem mappings...");
+	vtlb_LogEventCompact("reset_fastmem", "begin");
 
 	vtlb_RemoveFastmemMappings();
 	s_fastmem_backpatch_info.clear();
 	s_fastmem_faulting_pcs.clear();
 
 	if (!CHECK_FASTMEM || !CHECK_EEREC || !vtlbdata.vmap)
+	{
+		vtlb_LogEventCompact("reset_fastmem", "end skipped=1");
 		return;
+	}
 
 	// we need to go through and look at the vtlb pointers, to remap the host area
 	for (size_t i = 0; i < VTLB_VMAP_ITEMS; i++)
@@ -1311,6 +1476,7 @@ void vtlb_ResetFastmem()
 		if (vtlb_GetMainMemoryOffsetFromPtr(vm.assumePtr(vaddr), &mainmem_offset, &mainmem_size, &prot))
 			vtlb_CreateFastmemMapping(vaddr, mainmem_offset, prot);
 	}
+	vtlb_LogEventCompact("reset_fastmem", "end skipped=0");
 }
 
 // Reserves the vtlb core allocation used by various emulation components!
