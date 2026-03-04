@@ -292,7 +292,10 @@
     <ClCompile Include="Recording\Utilities\InputRecordingLogger.cpp" />
     <ClCompile Include="SIO\Memcard\MemoryCardFile.cpp" />
     <ClCompile Include="SIO\Memcard\MemoryCardFolder.cpp" />
+    <ClCompile Include="SIO\Memcard\MemoryCardAuthProvider.cpp" />
     <ClCompile Include="SIO\Memcard\MemoryCardProtocol.cpp" />
+    <ClCompile Include="Crypto\MagicGateCrypto.cpp" />
+    <ClCompile Include="..\3rdparty\crypto\des\des.cpp" />
     <ClCompile Include="SIO\Multitap\MultitapProtocol.cpp" />
     <ClCompile Include="SIO\Pad\PadBase.cpp" />
     <ClCompile Include="SIO\Pad\Pad.cpp" />
@@ -740,7 +743,9 @@
     <ClInclude Include="ShaderCacheVersion.h" />
     <ClInclude Include="SIO\Memcard\MemoryCardFile.h" />
     <ClInclude Include="SIO\Memcard\MemoryCardFolder.h" />
+    <ClInclude Include="SIO\Memcard\MemoryCardAuthProvider.h" />
     <ClInclude Include="SIO\Memcard\MemoryCardProtocol.h" />
+    <ClInclude Include="Crypto\MagicGateCrypto.h" />
     <ClInclude Include="SIO\Multitap\MultitapProtocol.h" />
     <ClInclude Include="SIO\Pad\PadBase.h" />
     <ClInclude Include="SIO\Pad\Pad.h" />

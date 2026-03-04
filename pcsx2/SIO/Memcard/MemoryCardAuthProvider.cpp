@@ -6,11 +6,13 @@
 #include "Host.h"
 #include "CDVD/CDVD.h"
 #include "common/Console.h"
+#include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
 #include "ps2/BiosTools.h"
 
 #include <cstring>
+#include <vector>
 
 static constexpr const char* SETTINGS_SECTION = "MemoryCards";
 static constexpr const char* SETTINGS_BLOB_PATH = "MagicGateKeyBlobPath";
