@@ -165,6 +165,7 @@ struct cdvdStruct
 extern cdvdStruct cdvd;
 
 extern void cdvdReadLanguageParams(u8* config);
+extern std::string cdvdGetBiosSidecarPath(const char* extension);
 
 extern void cdvdLoadNVRAM();
 extern void cdvdSaveNVRAM();
@@ -187,4 +188,3 @@ extern bool cdvdLoadDiscElf(ElfObject* elfo, IsoReader& isor, const std::string_
 
 extern s32 cdvdCtrlTrayOpen();
 extern s32 cdvdCtrlTrayClose();
-

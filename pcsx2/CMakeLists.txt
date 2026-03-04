@@ -114,6 +114,7 @@ set(pcsx2Sources
 	SIO/Multitap/MultitapProtocol.cpp
 	SIO/Memcard/MemoryCardFile.cpp
 	SIO/Memcard/MemoryCardFolder.cpp
+	SIO/Memcard/MemoryCardAuthProvider.cpp
 	SIO/Memcard/MemoryCardProtocol.cpp
 	SourceLog.cpp
 	SPR.cpp
@@ -190,6 +191,7 @@ set(pcsx2Headers
 	SIO/Multitap/MultitapProtocol.h
 	SIO/Memcard/MemoryCardFile.h
 	SIO/Memcard/MemoryCardFolder.h
+	SIO/Memcard/MemoryCardAuthProvider.h
 	SIO/Memcard/MemoryCardProtocol.h
 	SPR.h
 	SupportURLs.h
