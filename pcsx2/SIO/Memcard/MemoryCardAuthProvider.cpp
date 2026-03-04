@@ -6,7 +6,6 @@
 #include "Host.h"
 #include "CDVD/CDVD.h"
 #include "common/Console.h"
-#include "common/Error.h"
 #include "common/FileSystem.h"
 #include "common/Path.h"
 #include "ps2/BiosTools.h"
@@ -69,14 +68,14 @@ void MemoryCardAuthProvider::DetermineDefaultKeyset()
 
 bool MemoryCardAuthProvider::LoadBlob(const std::string& path, bool from_override)
 {
-	Error error;
-	std::vector<u8> blob;
-	if (!FileSystem::ReadBinaryFile(path.c_str(), &blob, &error))
+	auto blob_opt = FileSystem::ReadBinaryFile(path.c_str());
+	if (!blob_opt.has_value())
 	{
-		ERROR_LOG("MagicGate: failed to read {} key blob '{}': {}",
-			from_override ? "override" : "BIOS-coupled", path, error.GetDescription());
+		ERROR_LOG("MagicGate: failed to read {} key blob '{}'",
+			from_override ? "override" : "BIOS-coupled", path);
 		return false;
 	}
+	const std::vector<u8>& blob = *blob_opt;
 
 	if (blob.size() < 73)
 	{
@@ -104,16 +103,15 @@ bool MemoryCardAuthProvider::LoadBlob(const std::string& path, bool from_overrid
 	const std::string iv_path = Host::GetStringSettingValue(SETTINGS_SECTION, SETTINGS_IV_BLOB_PATH, "");
 	if (!iv_path.empty())
 	{
-		std::vector<u8> iv_blob;
-		if (FileSystem::ReadBinaryFile(iv_path.c_str(), &iv_blob, &error) && iv_blob.size() >= 9)
+		auto iv_blob_opt = FileSystem::ReadBinaryFile(iv_path.c_str());
+		if (iv_blob_opt && iv_blob_opt->size() >= 9)
 		{
 			for (MagicGateMaterial& material : m_material)
-				std::memcpy(material.iv.data(), iv_blob.data(), 9);
+				std::memcpy(material.iv.data(), iv_blob_opt->data(), 9);
 		}
 		else
 		{
-			ERROR_LOG("MagicGate: failed to load IV override '{}': {}", iv_path,
-				error.GetDescription());
+			ERROR_LOG("MagicGate: failed to load IV override '{}'", iv_path);
 		}
 	}
 
