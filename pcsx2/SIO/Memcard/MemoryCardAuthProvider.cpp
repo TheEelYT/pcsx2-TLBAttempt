@@ -4,6 +4,7 @@
 #include "SIO/Memcard/MemoryCardAuthProvider.h"
 
 #include "Host.h"
+#include "Config.h"
 #include "CDVD/CDVD.h"
 #include "common/Console.h"
 #include "common/FileSystem.h"
@@ -118,6 +119,42 @@ bool MemoryCardAuthProvider::LoadBlob(const std::string& path, bool from_overrid
 	return true;
 }
 
+
+bool MemoryCardAuthProvider::LoadLegacySplitBlobs(const std::string& directory, bool from_override)
+{
+	const std::string eks_path = Path::Combine(directory, "eks.bin");
+	const std::string cks_path = Path::Combine(directory, "cks.bin");
+	const std::string kek_path = Path::Combine(directory, "kek.bin");
+	const std::string civ_path = Path::Combine(directory, "civ.bin");
+
+	const auto eks_blob = FileSystem::ReadBinaryFile(eks_path.c_str());
+	const auto cks_blob = FileSystem::ReadBinaryFile(cks_path.c_str());
+	const auto kek_blob = FileSystem::ReadBinaryFile(kek_path.c_str());
+	const auto civ_blob = FileSystem::ReadBinaryFile(civ_path.c_str());
+
+	if (!eks_blob || !cks_blob || !kek_blob || !civ_blob)
+	{
+		ERROR_LOG("MagicGate: failed to read {} legacy split blobs in '{}' (expected eks.bin/cks.bin/kek.bin/civ.bin)",
+			from_override ? "override" : "fallback", directory);
+		return false;
+	}
+
+	if (eks_blob->size() < 16 || cks_blob->size() < 16 || kek_blob->size() < 16 || civ_blob->size() < 9)
+	{
+		ERROR_LOG("MagicGate: legacy split blobs in '{}' have invalid sizes (eks={}, cks={}, kek={}, civ={})",
+			directory, eks_blob->size(), cks_blob->size(), kek_blob->size(), civ_blob->size());
+		return false;
+	}
+
+	// Legacy PR #4274-style files are treated as retail material for memory-card auth.
+	MagicGateMaterial& retail = m_material[static_cast<size_t>(MagicGateKeyset::Retail)];
+	std::memcpy(retail.key.data(), kek_blob->data(), 16);
+	std::memcpy(retail.iv.data(), civ_blob->data(), 9);
+	retail.valid = true;
+
+	return true;
+}
+
 void MemoryCardAuthProvider::Refresh()
 {
 	for (MagicGateMaterial& material : m_material)
@@ -133,15 +170,37 @@ void MemoryCardAuthProvider::Refresh()
 			return;
 		}
 
+		if (FileSystem::DirectoryExists(override_path->c_str()) && LoadLegacySplitBlobs(*override_path, true))
+		{
+			INFO_LOG("MagicGate: using override legacy split key files from '{}'", *override_path);
+			return;
+		}
+
 		WARNING_LOG("MagicGate: override blob failed, falling back to BIOS-coupled discovery.");
 	}
 
 	const std::string bios_blob_path = GetBiosCoupledBlobPath();
-	if (!LoadBlob(bios_blob_path, false))
+	if (LoadBlob(bios_blob_path, false))
+		return;
+
+	std::vector<std::string> legacy_dirs;
+	legacy_dirs.emplace_back(Path::Combine(std::string(Path::GetDirectory(BiosPath)), "magicgate"));
+	legacy_dirs.emplace_back(Path::Combine(EmuFolders::DataRoot, "magicgate"));
+
+	for (const std::string& dir : legacy_dirs)
 	{
-		WARNING_LOG("MagicGate: no key material available for BIOS '{}', auth will run in degraded mode.",
-			Path::GetFileName(BiosPath));
+		if (!FileSystem::DirectoryExists(dir.c_str()))
+			continue;
+
+		if (LoadLegacySplitBlobs(dir, false))
+		{
+			INFO_LOG("MagicGate: using legacy split key files from '{}'", dir);
+			return;
+		}
 	}
+
+	WARNING_LOG("MagicGate: no key material available for BIOS '{}', auth will run in degraded mode.",
+		Path::GetFileName(BiosPath));
 }
 
 MagicGateKeyset MemoryCardAuthProvider::GetDefaultKeyset() const

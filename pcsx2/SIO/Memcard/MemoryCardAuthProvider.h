@@ -39,5 +39,6 @@ private:
 	std::optional<std::string> LoadBlobPathFromSettings() const;
 	std::string GetBiosCoupledBlobPath() const;
 	bool LoadBlob(const std::string& path, bool from_override);
+	bool LoadLegacySplitBlobs(const std::string& directory, bool from_override);
 	void DetermineDefaultKeyset();
 };
