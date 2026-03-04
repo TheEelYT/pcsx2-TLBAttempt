@@ -158,6 +158,7 @@ namespace EmuFolders
 	std::string Snapshots;
 	std::string Savestates;
 	std::string MemoryCards;
+	std::string MagicGate;
 	std::string Logs;
 	std::string Cheats;
 	std::string Patches;
@@ -2260,6 +2261,7 @@ void EmuFolders::SetDefaults(SettingsInterface& si)
 	si.SetStringValue("Folders", "Snapshots", "snaps");
 	si.SetStringValue("Folders", "Savestates", "sstates");
 	si.SetStringValue("Folders", "MemoryCards", "memcards");
+	si.SetStringValue("Folders", "MagicGate", "magicgate");
 	si.SetStringValue("Folders", "Logs", "logs");
 	si.SetStringValue("Folders", "Cheats", "cheats");
 	si.SetStringValue("Folders", "Patches", "patches");
@@ -2286,6 +2288,7 @@ void EmuFolders::LoadConfig(SettingsInterface& si)
 	Snapshots = LoadPathFromSettings(si, DataRoot, "Snapshots", "snaps");
 	Savestates = LoadPathFromSettings(si, DataRoot, "Savestates", "sstates");
 	MemoryCards = LoadPathFromSettings(si, DataRoot, "MemoryCards", "memcards");
+	MagicGate = LoadPathFromSettings(si, DataRoot, "MagicGate", "magicgate");
 	Logs = LoadPathFromSettings(si, DataRoot, "Logs", "logs");
 	Cheats = LoadPathFromSettings(si, DataRoot, "Cheats", "cheats");
 	Patches = LoadPathFromSettings(si, DataRoot, "Patches", "patches");
@@ -2303,6 +2306,7 @@ void EmuFolders::LoadConfig(SettingsInterface& si)
 	Console.WriteLn("Snapshots Directory: %s", Snapshots.c_str());
 	Console.WriteLn("Savestates Directory: %s", Savestates.c_str());
 	Console.WriteLn("MemoryCards Directory: %s", MemoryCards.c_str());
+	Console.WriteLn("MagicGate Directory: %s", MagicGate.c_str());
 	Console.WriteLn("Logs Directory: %s", Logs.c_str());
 	Console.WriteLn("Cheats Directory: %s", Cheats.c_str());
 	Console.WriteLn("Patches Directory: %s", Patches.c_str());
@@ -2325,6 +2329,7 @@ bool EmuFolders::EnsureFoldersExist()
 	result = FileSystem::CreateDirectoryPath(Snapshots.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(Savestates.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(MemoryCards.c_str(), false) && result;
+	result = FileSystem::CreateDirectoryPath(MagicGate.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(Logs.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(Cheats.c_str(), false) && result;
 	result = FileSystem::CreateDirectoryPath(Patches.c_str(), false) && result;
