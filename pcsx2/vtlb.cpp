@@ -87,6 +87,25 @@ static std::unordered_multimap<u32, u32> s_fastmem_physical_mapping; // maps mai
 static std::unordered_map<uptr, LoadstoreBackpatchInfo> s_fastmem_backpatch_info;
 static std::unordered_set<u32> s_fastmem_faulting_pcs;
 
+struct VTLBFaultLogState
+{
+	u32 burst_count = 0;
+	u32 suppressed_count = 0;
+	u32 pc = 0;
+	u32 addr = 0;
+	u32 badvaddr = 0;
+	u32 entryhi = 0;
+	u32 context = 0;
+	u8 mode = 0;
+	bool branch = false;
+};
+
+static VTLBFaultLogState s_vtlb_miss_log_state;
+static VTLBFaultLogState s_vtlb_bus_error_log_state;
+
+static constexpr u32 VTLB_FAULT_LOG_BURST_LIMIT = 8;
+static constexpr u32 VTLB_FAULT_LOG_SUMMARY_INTERVAL = 1024;
+
 static bool vtlb_ShouldLogCompact()
 {
 	return IsDevBuild || EmuConfig.Trace.Enabled;
@@ -137,6 +156,44 @@ static void vtlb_LogEventVerbose(std::string_view event, const std::string& deta
 
 static void vtlb_LogCpuStateSnapshot(std::string_view event, u32 addr, u32 mode)
 {
+	VTLBFaultLogState& state = (event == "miss") ? s_vtlb_miss_log_state : s_vtlb_bus_error_log_state;
+	const bool same_fault = (state.pc == cpuRegs.pc && state.addr == addr && state.mode == mode && state.branch == cpuRegs.branch &&
+		state.badvaddr == cpuRegs.CP0.n.BadVAddr && state.entryhi == cpuRegs.CP0.n.EntryHi && state.context == cpuRegs.CP0.n.Context);
+
+	if (same_fault)
+	{
+		if (state.burst_count >= VTLB_FAULT_LOG_BURST_LIMIT)
+		{
+			state.suppressed_count++;
+			if ((state.suppressed_count % VTLB_FAULT_LOG_SUMMARY_INTERVAL) == 0)
+			{
+				vtlb_LogEventCompact(event, fmt::format("suppressed={} repeated_fault pc={:08X} bd={} access={} vaddr={:08X}",
+					state.suppressed_count, state.pc, state.branch ? 1 : 0, vtlb_AccessModeToString(mode), state.addr));
+			}
+			return;
+		}
+
+		state.burst_count++;
+	}
+	else
+	{
+		if (state.suppressed_count != 0)
+		{
+			vtlb_LogEventCompact(event, fmt::format("suppressed={} repeated_fault pc={:08X} bd={} access={} vaddr={:08X}",
+				state.suppressed_count, state.pc, state.branch ? 1 : 0, vtlb_AccessModeToString(state.mode), state.addr));
+		}
+
+		state.pc = cpuRegs.pc;
+		state.addr = addr;
+		state.badvaddr = cpuRegs.CP0.n.BadVAddr;
+		state.entryhi = cpuRegs.CP0.n.EntryHi;
+		state.context = cpuRegs.CP0.n.Context;
+		state.mode = static_cast<u8>(mode);
+		state.branch = cpuRegs.branch;
+		state.burst_count = 1;
+		state.suppressed_count = 0;
+	}
+
 	const std::string compact = fmt::format("pc={:08X} bd={} access={} vaddr={:08X}",
 		cpuRegs.pc, cpuRegs.branch ? 1 : 0, vtlb_AccessModeToString(mode), addr);
 	vtlb_LogEventCompact(event, compact);
@@ -1372,6 +1429,8 @@ void vtlb_Init()
 void vtlb_Reset()
 {
 	vtlb_LogEventCompact("reset", "begin");
+	s_vtlb_miss_log_state = {};
+	s_vtlb_bus_error_log_state = {};
 	vtlb_RemoveFastmemMappings();
 	for (int i = 0; i < 48; i++)
 		UnmapTLB(tlb[i], i);
