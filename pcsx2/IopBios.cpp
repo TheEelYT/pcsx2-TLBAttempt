@@ -665,7 +665,7 @@ namespace R3000A
 				if (root.empty())
 					return;
 
-				if (!Path::IsDirectory(root) && !Path::GetExtension(root).empty())
+				if (!FileSystem::DirectoryExists(root.c_str()) && !Path::GetExtension(root).empty())
 				{
 					xfrom_log_invalid_candidate_once(source, root, rel);
 					return;
