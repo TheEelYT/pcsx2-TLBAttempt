@@ -14,6 +14,7 @@
  */
 
 #include "PrecompiledHeader.h"
+#include "CDVDcommon.h"
 #include "AppConfig.h"
 
 #include <memory>
