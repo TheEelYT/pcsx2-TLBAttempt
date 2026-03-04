@@ -211,9 +211,14 @@ static void cdvdCreateNewNVM()
 	std::memcpy(&s_nvram[nvmLayout->config1 + 0x10], biosLangDefaults[BiosRegion], 16);
 }
 
+std::string cdvdGetBiosSidecarPath(const char* extension)
+{
+	return Path::ReplaceExtension(BiosPath, extension);
+}
+
 static std::string cdvdGetNVRAMPath()
 {
-	return Path::ReplaceExtension(BiosPath, "nvm");
+	return cdvdGetBiosSidecarPath("nvm");
 }
 
 void cdvdLoadNVRAM()
@@ -242,7 +247,7 @@ void cdvdLoadNVRAM()
 	}
 
 	// Also load the mechacon version while we're here.
-	const std::string mecfile = Path::ReplaceExtension(BiosPath, "mec");
+	const std::string mecfile = cdvdGetBiosSidecarPath("mec");
 	fp = FileSystem::OpenManagedCFileTryIgnoreCase(mecfile.c_str(), "rb", &error);
 	if (!fp || std::fread(&s_mecha_version, sizeof(s_mecha_version), 1, fp.get()) != 1)
 	{

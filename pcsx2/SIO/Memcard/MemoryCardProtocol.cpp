@@ -9,6 +9,8 @@
 
 #include "common/Assertions.h"
 #include "common/Console.h"
+#include "common/Path.h"
+#include "ps2/BiosTools.h"
 
 #include <cstring>
 
@@ -522,6 +524,8 @@ void MemoryCardProtocol::AuthCrypt()
 		case 0x43:
 		case 0x53:
 			authCryptReceive = false;
+			if (!authMaterialLoaded)
+				WARNING_LOG("MagicGate: crypt response requested without available key material; returning framed zero data.");
 			g_Sio2FifoOut.push_back(0x00);
 			g_Sio2FifoOut.push_back(0x2b);
 			for (const u8 data : authCryptBuffer)
@@ -549,8 +553,22 @@ void MemoryCardProtocol::AuthF3()
 	}
 	else
 	{
+		m_auth_provider.Refresh();
+		m_current_keyset = m_auth_provider.GetDefaultKeyset();
+		const MagicGateMaterial& material = m_auth_provider.GetMaterial(m_current_keyset);
+		authMaterialLoaded = material.valid;
+		authCryptBuffer = material.iv;
+
+		if (!authMaterialLoaded)
+		{
+			WARNING_LOG("MagicGate: keyset '{}' unavailable for BIOS '{}'. Keeping auth framing but crypt payload will be inert.",
+				m_auth_provider.GetKeysetName(m_current_keyset), Path::GetFileName(BiosPath));
+		}
+
 		mcd->term = Terminator::READY;
-		authCurrentKey = &authDexKey;
+
+		// This provider-driven path is the modernized replacement for PR #4274's
+		// eks.bin/cks.bin/kek.bin/civ.bin lookup strategy.
 		The2bTerminator(5);
 	}
 }
@@ -561,9 +579,31 @@ void MemoryCardProtocol::AuthKeySelect()
 	PS1_FAIL();
 	const u8 keyIndex = g_Sio2FifoIn.front();
 	g_Sio2FifoIn.pop_front();
+	MagicGateKeyset requested_keyset = m_current_keyset;
 
 	if (keyIndex == 0x01)
-		authCurrentKey = &authCexKey;
+		requested_keyset = MagicGateKeyset::Retail;
+	else if (keyIndex == 0x02)
+		requested_keyset = MagicGateKeyset::Dev;
+	else if (keyIndex == 0x03)
+		requested_keyset = MagicGateKeyset::Proto;
+	else if (keyIndex == 0x04)
+		requested_keyset = MagicGateKeyset::Arcade;
+
+	const MagicGateMaterial& material = m_auth_provider.GetMaterial(requested_keyset);
+	if (!material.valid)
+	{
+		WARNING_LOG("MagicGate: requested keyset '{}' is unavailable. Continuing with inert auth payloads.",
+			m_auth_provider.GetKeysetName(requested_keyset));
+		authMaterialLoaded = false;
+		authCryptBuffer.fill(0);
+	}
+	else
+	{
+		m_current_keyset = requested_keyset;
+		authMaterialLoaded = true;
+		authCryptBuffer = material.iv;
+	}
 
 	// Behavior derived from PCSX2 PR #4274: key select command acks with short 0x2B frame.
 	The2bTerminator(5);
