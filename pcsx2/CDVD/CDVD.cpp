@@ -2501,7 +2501,14 @@ static bool MgVerifyChallengeResponse()
 	MagicGateCrypto::DesDecrypt(s_mg_auth.iv_seed, s_mg_auth.challenge_1, &expected_r2);
 
 	if (s_mg_auth.response_1 != expected_r1 || s_mg_auth.response_2 != expected_r2)
+	{
+		DEV_LOG("MagicGate[CDVD]: challenge exchange milestone failed (slot={}, index={}).",
+			s_mg_auth.card_key_slot, s_mg_auth.card_key_index);
 		return false;
+	}
+
+	DEV_LOG("MagicGate[CDVD]: challenge exchange milestone verified (slot={}, index={}).",
+		s_mg_auth.card_key_slot, s_mg_auth.card_key_index);
 
 	MagicGateCrypto::Key16 key = {};
 	std::copy_n(s_mg_auth.seed.begin(), 8, key.begin());
@@ -2521,6 +2528,11 @@ static bool MgVerifyChallengeResponse()
 static bool MgVerifyKelfHeaderAndPublishKeys()
 {
 	// ported/adapted from PCSX2 PR #4274: KELF header verification + Kbit/Kc publication stage.
+	// Follow-up from "PCSX2 PR #4274 reviewer note by balika011": Namco System 246/256
+	// reportedly fails before decrypt, so retain explicit traces around pre-decrypt checkpoints.
+	DEV_LOG("MagicGate[CDVD]: decrypt-attempt milestone entered (datatype={}, size={}, maxsize={}, stage={}).",
+		cdvd.mg_datatype, cdvd.mg_size, cdvd.mg_maxsize, static_cast<u32>(s_mg_auth.stage));
+
 	if (cdvd.mg_datatype != 1 || cdvd.mg_maxsize != cdvd.mg_size || cdvd.mg_size < 0x20)
 		return false;
 
