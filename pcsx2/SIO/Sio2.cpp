@@ -365,11 +365,16 @@ void Sio2::Memcard()
 		case MemcardCommand::AUTH_XOR:
 			g_MemoryCardProtocol.AuthXor();
 			break;
+		// Behavior derived from PCSX2 PR #4274: auth/crypt commands are routed via protocol handlers.
+		case MemcardCommand::AUTH_CRYPT_1:
+		case MemcardCommand::AUTH_CRYPT_2:
+			g_MemoryCardProtocol.AuthCrypt();
+			break;
 		case MemcardCommand::AUTH_F3:
 			g_MemoryCardProtocol.AuthF3();
 			break;
-		case MemcardCommand::AUTH_F7:
-			g_MemoryCardProtocol.AuthF7();
+		case MemcardCommand::AUTH_KEY_SELECT:
+			g_MemoryCardProtocol.AuthKeySelect();
 			break;
 		default:
 			Console.Warning("%s() Unhandled memcard command %02X, things are about to break!", __FUNCTION__, commandByte);

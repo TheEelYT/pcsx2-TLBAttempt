@@ -431,43 +431,41 @@ void MemoryCardProtocol::UnknownBoot()
 	The2bTerminator(5);
 }
 
+void MemoryCardProtocol::AuthXorDataFrame()
+{
+	u8 xorResult = 0x00;
+	g_Sio2FifoOut.push_back(0x00);
+	g_Sio2FifoOut.push_back(0x2b);
+
+	for (size_t xorCounter = 0; xorCounter < 8; xorCounter++)
+	{
+		const u8 toXOR = g_Sio2FifoIn.front();
+		g_Sio2FifoIn.pop_front();
+		xorResult ^= toXOR;
+		g_Sio2FifoOut.push_back(0x00);
+	}
+
+	g_Sio2FifoOut.push_back(xorResult);
+	g_Sio2FifoOut.push_back(mcd->term);
+}
+
 void MemoryCardProtocol::AuthXor()
 {
 	MC_LOG.WriteLn("%s", __FUNCTION__);
 	PS1_FAIL();
 	const u8 modeByte = g_Sio2FifoIn.front();
 	g_Sio2FifoIn.pop_front();
-
 	switch (modeByte)
 	{
-		// When encountered, the command length in RECV3 is guaranteed to be 14,
-		// and the PS2 is expecting us to XOR the data it is about to send.
+		// Behavior derived from PCSX2 PR #4274: XOR phase with 0x2B+terminator framing.
 		case 0x01:
 		case 0x02:
 		case 0x04:
 		case 0x0f:
 		case 0x11:
 		case 0x13:
-		{
-			// Long + XOR
-			g_Sio2FifoOut.push_back(0x00);
-			g_Sio2FifoOut.push_back(0x2b);
-			u8 xorResult = 0x00;
-
-			for (size_t xorCounter = 0; xorCounter < 8; xorCounter++)
-			{
-				const u8 toXOR = g_Sio2FifoIn.front();
-				g_Sio2FifoIn.pop_front();
-				xorResult ^= toXOR;
-				g_Sio2FifoOut.push_back(0x00);
-			}
-
-			g_Sio2FifoOut.push_back(xorResult);
-			g_Sio2FifoOut.push_back(mcd->term);
+			AuthXorDataFrame();
 			break;
-		}
-		// When encountered, the command length in RECV3 is guaranteed to be 5,
-		// and there is no attempt to XOR anything.
 		case 0x00:
 		case 0x03:
 		case 0x05:
@@ -480,25 +478,59 @@ void MemoryCardProtocol::AuthXor()
 		case 0x10:
 		case 0x12:
 		case 0x14:
-		{
-			// Short + No XOR
 			The2bTerminator(5);
 			break;
-		}
-		// When encountered, the command length in RECV3 is guaranteed to be 14,
-		// and the PS2 is about to send us data, BUT the PS2 does NOT want us
-		// to send the XOR, it wants us to send the 0x2b and terminator as the
-		// last two bytes.
 		case 0x06:
 		case 0x07:
 		case 0x0b:
-		{
-			// Long + No XOR
 			The2bTerminator(14);
 			break;
-		}
 		default:
 			Console.Warning("%s(queue) Unexpected modeByte (%02X), please report to the PCSX2 team", __FUNCTION__, modeByte);
+			break;
+	}
+}
+
+void MemoryCardProtocol::AuthCrypt()
+{
+	MC_LOG.WriteLn("%s", __FUNCTION__);
+	PS1_FAIL();
+	const u8 modeByte = g_Sio2FifoIn.front();
+	g_Sio2FifoIn.pop_front();
+
+	switch (modeByte)
+	{
+		// Behavior derived from PCSX2 PR #4274: command windows for crypt receive/send.
+		case 0x40:
+		case 0x42:
+		case 0x50:
+		case 0x52:
+			authCryptReceive = false;
+			AuthXorDataFrame();
+			break;
+		case 0x41:
+		case 0x51:
+			authCryptReceive = true;
+			authCryptOffset = 0;
+			while (!g_Sio2FifoIn.empty() && authCryptOffset < authCryptBuffer.size())
+			{
+				authCryptBuffer[authCryptOffset++] = g_Sio2FifoIn.front();
+				g_Sio2FifoIn.pop_front();
+			}
+			The2bTerminator(5);
+			break;
+		case 0x43:
+		case 0x53:
+			authCryptReceive = false;
+			g_Sio2FifoOut.push_back(0x00);
+			g_Sio2FifoOut.push_back(0x2b);
+			for (const u8 data : authCryptBuffer)
+				g_Sio2FifoOut.push_back(data);
+			g_Sio2FifoOut.push_back(mcd->term);
+			break;
+		default:
+			authCryptReceive = false;
+			The2bTerminator(5);
 			break;
 	}
 }
@@ -518,13 +550,26 @@ void MemoryCardProtocol::AuthF3()
 	else
 	{
 		mcd->term = Terminator::READY;
+		authCurrentKey = &authDexKey;
 		The2bTerminator(5);
 	}
 }
 
-void MemoryCardProtocol::AuthF7()
+void MemoryCardProtocol::AuthKeySelect()
 {
 	MC_LOG.WriteLn("%s", __FUNCTION__);
 	PS1_FAIL();
+	const u8 keyIndex = g_Sio2FifoIn.front();
+	g_Sio2FifoIn.pop_front();
+
+	if (keyIndex == 0x01)
+		authCurrentKey = &authCexKey;
+
+	// Behavior derived from PCSX2 PR #4274: key select command acks with short 0x2B frame.
 	The2bTerminator(5);
+}
+
+void MemoryCardProtocol::AuthF7()
+{
+	AuthKeySelect();
 }
