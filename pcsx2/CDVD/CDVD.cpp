@@ -4,6 +4,7 @@
 #include "CDVD/CDVD.h"
 #include "CDVD/Ps1CD.h"
 #include "CDVD/CDVD_internal.h"
+#include "Crypto/MagicGateCrypto.h"
 #include "CDVD/IsoReader.h"
 #include "CDVD/IsoFileFormats.h"
 #include "GS.h"
@@ -2475,30 +2476,42 @@ static __fi void fail_pol_cal()
 
 static void MgGenerateChallenge()
 {
-	// ported/adapted from PCSX2 PR #4274: challenge generation stage, simplified to deterministic mixing without legacy keystore blobs.
+	// Adapted crypto backend for behavior introduced in PCSX2 PR #4274.
+	MagicGateCrypto::Key16 key = {};
+	std::copy_n(s_mg_auth.seed.begin(), 8, key.begin());
+	std::copy_n(s_mg_auth.iv_seed.begin(), 8, key.begin() + 8);
+
+	MagicGateCrypto::TwoDesEncrypt(key, s_mg_auth.nonce, &s_mg_auth.challenge_1);
+	MagicGateCrypto::DesEncrypt(s_mg_auth.seed, s_mg_auth.challenge_1, &s_mg_auth.challenge_2);
+	MagicGateCrypto::DesEncrypt(s_mg_auth.iv_seed, s_mg_auth.challenge_2, &s_mg_auth.challenge_3);
+
+	const u8 slot_mix = static_cast<u8>((s_mg_auth.card_key_slot << 2) ^ (s_mg_auth.card_key_index * 0x13));
 	for (u32 i = 0; i < 8; i++)
-	{
-		const u8 slot_mix = static_cast<u8>((s_mg_auth.card_key_slot << 2) ^ (s_mg_auth.card_key_index * 0x13));
-		s_mg_auth.challenge_1[i] = static_cast<u8>(s_mg_auth.iv_seed[i] ^ s_mg_auth.seed[i] ^ slot_mix ^ static_cast<u8>(i * 0x11));
-		s_mg_auth.challenge_2[i] = static_cast<u8>(s_mg_auth.challenge_1[i] ^ s_mg_auth.nonce[i] ^ 0x5A);
-		s_mg_auth.challenge_3[i] = static_cast<u8>(s_mg_auth.challenge_2[i] ^ s_mg_auth.iv_seed[(i + 3) & 7] ^ 0xA5);
-	}
+		s_mg_auth.challenge_2[i] ^= static_cast<u8>(slot_mix + i);
+
 	s_mg_auth.stage = MgAuthStage::ChallengeReady;
 }
 
 static bool MgVerifyChallengeResponse()
 {
-	// ported/adapted from PCSX2 PR #4274: response verification stage with modern lightweight checks.
-	for (u32 i = 0; i < 8; i++)
-	{
-		const u8 expected_r1 = static_cast<u8>(s_mg_auth.nonce[i] ^ 0xA5);
-		const u8 expected_r2 = static_cast<u8>(s_mg_auth.challenge_1[i] ^ 0x3C);
-		if (s_mg_auth.response_1[i] != expected_r1 || s_mg_auth.response_2[i] != expected_r2)
-			return false;
-	}
+	// Adapted crypto backend for behavior introduced in PCSX2 PR #4274.
+	MagicGateCrypto::Block8 expected_r1 = {};
+	MagicGateCrypto::Block8 expected_r2 = {};
+	MagicGateCrypto::DesDecrypt(s_mg_auth.seed, s_mg_auth.challenge_3, &expected_r1);
+	MagicGateCrypto::DesDecrypt(s_mg_auth.iv_seed, s_mg_auth.challenge_1, &expected_r2);
 
-	for (u32 i = 0; i < 16; i++)
-		s_mg_auth.icvps2_key[i] = static_cast<u8>(s_mg_auth.seed[i & 7] ^ s_mg_auth.nonce[(i + 1) & 7] ^ (i * 9));
+	if (s_mg_auth.response_1 != expected_r1 || s_mg_auth.response_2 != expected_r2)
+		return false;
+
+	MagicGateCrypto::Key16 key = {};
+	std::copy_n(s_mg_auth.seed.begin(), 8, key.begin());
+	std::copy_n(s_mg_auth.iv_seed.begin(), 8, key.begin() + 8);
+	MagicGateCrypto::Block8 icv_hi = {};
+	MagicGateCrypto::Block8 icv_lo = {};
+	MagicGateCrypto::TwoDesEncrypt(key, s_mg_auth.nonce, &icv_hi);
+	MagicGateCrypto::TwoDesDecrypt(key, s_mg_auth.challenge_1, &icv_lo);
+	std::copy_n(icv_hi.begin(), 8, s_mg_auth.icvps2_key.begin());
+	std::copy_n(icv_lo.begin(), 8, s_mg_auth.icvps2_key.begin() + 8);
 
 	s_mg_auth.stage = MgAuthStage::CardVerified;
 	s_mg_auth.icvps2_published = false;
