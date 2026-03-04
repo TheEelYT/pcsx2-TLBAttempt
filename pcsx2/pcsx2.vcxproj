@@ -294,8 +294,12 @@
     <ClCompile Include="SIO\Memcard\MemoryCardFolder.cpp" />
     <ClCompile Include="SIO\Memcard\MemoryCardAuthProvider.cpp" />
     <ClCompile Include="SIO\Memcard\MemoryCardProtocol.cpp" />
-    <ClCompile Include="Crypto\MagicGateCrypto.cpp" />
-    <ClCompile Include="..\3rdparty\crypto\des\des.cpp" />
+    <ClCompile Include="Crypto\MagicGateCrypto.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\3rdparty\crypto\des\des.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="SIO\Multitap\MultitapProtocol.cpp" />
     <ClCompile Include="SIO\Pad\PadBase.cpp" />
     <ClCompile Include="SIO\Pad\Pad.cpp" />
