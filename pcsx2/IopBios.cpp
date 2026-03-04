@@ -599,6 +599,11 @@ namespace R3000A
 					return 1;
 				}
 
+				if (StringUtil::Strcasecmp(Path::GetFileName(path), "boot.bin") == 0)
+				{
+					DEV_LOG("MagicGate[IOP]: boot.bin open milestone path='{}' flags=0x{:X} mode=0x{:X}", path, flags, mode);
+				}
+
 				int err = HostFile::open(&file, path, flags, mode);
 
 				if (err != 0 || !file)

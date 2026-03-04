@@ -557,6 +557,8 @@ void MemoryCardProtocol::AuthCrypt()
 		case MemcardAuthMode::CRYPT_PAYLOAD_DECRYPT:
 		case MemcardAuthMode::CRYPT_PAYLOAD_ENCRYPT:
 		{
+			DEV_LOG("MagicGate[SIO]: crypt payload received (mode=0x{:02X}, keyset='{}', material_loaded={})",
+				modeByte, m_auth_provider.GetKeysetName(m_current_keyset), authMaterialLoaded);
 			std::array<u8, 9> incoming = {};
 			u8 incoming_size = 0;
 			while (!g_Sio2FifoIn.empty() && incoming_size < incoming.size())
@@ -579,6 +581,7 @@ void MemoryCardProtocol::AuthCrypt()
 			// Adapted crypto backend for PR #4274 behavior: shared internal DES/2DES API.
 			if (authMaterialLoaded && m_auth_crypt_state == AuthCryptState::PayloadReady)
 			{
+				DEV_LOG("MagicGate[SIO]: pre-decrypt handshake milestone reached (mode=0x{:02X}).", modeByte);
 				const MagicGateMaterial& material = m_auth_provider.GetMaterial(m_current_keyset);
 				MagicGateCrypto::Block8 input = {};
 				MagicGateCrypto::Block8 output = {};
@@ -632,6 +635,12 @@ void MemoryCardProtocol::AuthF3()
 		const MagicGateMaterial& material = m_auth_provider.GetMaterial(m_current_keyset);
 		authMaterialLoaded = material.valid;
 		authCryptBuffer = material.iv;
+
+		// PCSX2 PR #4274 reviewer note by balika011 identified Namco System 246/256
+		// failures before decrypt; this card-init trace is the first milestone to
+		// quickly distinguish SIO auth setup from later CDVD decrypt stages.
+		DEV_LOG("MagicGate[SIO]: card init milestone (AUTH_F3) keyset='{}' material_loaded={} bios='{}'",
+			m_auth_provider.GetKeysetName(m_current_keyset), authMaterialLoaded, Path::GetFileName(BiosPath));
 
 		if (!authMaterialLoaded)
 		{

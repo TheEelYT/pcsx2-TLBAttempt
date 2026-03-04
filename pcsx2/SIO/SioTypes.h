@@ -73,6 +73,10 @@ namespace MemcardCommand
 namespace MemcardAuthMode
 {
 	// legacy equivalent of PR #4274 SIO_MEMCARD_CRYPT / SIO_MEMCARD_KEY_SELECT.
+	// Follow-up linked to "PCSX2 PR #4274 reviewer note by balika011":
+	// Namco System 246/256 reportedly fails before decrypt, so pair these modes with
+	// traces/acceptance checkpoints for card-init, boot.bin-open, challenge-exchange,
+	// and decrypt-attempt milestones.
 	static constexpr u8 XOR_DATA_FRAME_1 = 0x01;
 	static constexpr u8 XOR_DATA_FRAME_2 = 0x02;
 	static constexpr u8 XOR_DATA_FRAME_4 = 0x04;
