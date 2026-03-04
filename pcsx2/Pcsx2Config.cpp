@@ -237,6 +237,7 @@ void TraceLogFilters::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(EE.mskpath3);
 	SettingsWrapBitBool(EE.r5900);
 	SettingsWrapBitBool(EE.cop0);
+	SettingsWrapBitBool(EE.tlbmmu);
 	SettingsWrapBitBool(EE.cop1);
 	SettingsWrapBitBool(EE.cop2);
 	SettingsWrapBitBool(EE.cache);
@@ -277,6 +278,7 @@ void TraceLogFilters::SyncToConfig() const
 	ee.MSKPATH3.Enabled = EE.mskpath3;
 	ee.R5900.Enabled = EE.r5900;
 	ee.COP0.Enabled = EE.cop0;
+	ee.TLBMMU.Enabled = EE.tlbmmu;
 	ee.COP1.Enabled = EE.cop1;
 	ee.COP2.Enabled = EE.cop2;
 	ee.KnownHw.Enabled = EE.knownhw;

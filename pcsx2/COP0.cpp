@@ -224,14 +224,35 @@ __fi void COP0_UpdatePCCR()
 //
 
 
+static void LogTLBEvent(const char* op, s32 selected, u32 page_mask, u32 entry_hi, u32 entry_lo0, u32 entry_lo1)
+{
+	const bool global = ((entry_lo0 & 0x1) != 0) && ((entry_lo1 & 0x1) != 0);
+	const bool scratch = (entry_lo0 & 0x80000000u) != 0;
+	const bool cache0 = ((entry_lo0 >> 3) & 0x7) == 0x3;
+	const bool cache1 = ((entry_lo1 >> 3) & 0x7) == 0x3;
+	const u32 asid = entry_hi & 0xff;
+
+	TLB_LOG("TLB_EVT cyc=%u pc=%08X op=%s idx=%u rnd=%u wired=%u sel=%d EntryHi=%08X PageMask=%08X EntryLo0=%08X EntryLo1=%08X ASID=%02X G=%u SPR=%u C0=%u C1=%u",
+		cpuRegs.cycle, cpuRegs.pc, op, cpuRegs.CP0.n.Index & 0x3f, cpuRegs.CP0.n.Random & 0x3f, cpuRegs.CP0.n.Wired & 0x3f,
+		selected, entry_hi, page_mask, entry_lo0, entry_lo1, asid, global ? 1u : 0u, scratch ? 1u : 0u, cache0 ? 1u : 0u, cache1 ? 1u : 0u);
+}
+
+static void LogTLBEvent(const char* op, s32 selected)
+{
+	LogTLBEvent(op, selected, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+}
+
+static void LogTLBEntryEvent(const char* op, s32 selected, const tlbs& t)
+{
+	LogTLBEvent(op, selected, t.PageMask.UL, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL);
+}
+
 void MapTLB(const tlbs& t, int i)
 {
 	u32 mask, addr;
 	u32 saddr, eaddr;
 
-	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
-		i, t.VPN2(), t.PFN0(), t.PFN1(), t.isSPR() >> 31, t.isGlobal(), t.EntryHi.ASID,
-		t.Mask(), t.EntryLo0.PFN, t.EntryLo0.C, t.EntryLo1.PFN, t.EntryLo1.C, t.VPN2());
+	LogTLBEntryEvent("MAP", i, t);
 
 	// According to the manual
 	// 'It [SPR] must be mapped into a contiguous 16 KB of virtual address space that is
@@ -396,15 +417,13 @@ namespace COP0 {
 
 	void TLBR()
 	{
-		COP0_LOG("COP0_TLBR %d:%x,%x,%x,%x",
-			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
-			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		LogTLBEvent("TLBR_REQ", cpuRegs.CP0.n.Index & 0x3f);
 
 		const u8 i = cpuRegs.CP0.n.Index & 0x3f;
 
 		if (i > 47)
 		{
-			Console.Warning("TLBR with index > 47! (%d)", i);
+			LogTLBEvent("TLBR_OOB", i);
 			return;
 		}
 
@@ -416,6 +435,7 @@ namespace COP0 {
 		// This is reflected during TLBR, where G is only set if both EntryLo0 and EntryLo1 are global.
 		cpuRegs.CP0.n.EntryLo0 |= (tlb[i].EntryLo0.UL & 1) & (tlb[i].EntryLo1.UL & 1);
 		cpuRegs.CP0.n.EntryLo1 |= (tlb[i].EntryLo0.UL & 1) & (tlb[i].EntryLo1.UL & 1);
+		LogTLBEvent("TLBR_RES", i);
 	}
 
 	void TLBWI()
@@ -424,13 +444,11 @@ namespace COP0 {
 
 		if (j > 47)
 		{
-			Console.Warning("TLBWI with index > 47! (%d)", j);
+			LogTLBEvent("TLBWI_OOB", j);
 			return;
 		}
 
-		COP0_LOG("COP0_TLBWI %d:%x,%x,%x,%x",
-			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
-			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		LogTLBEvent("TLBWI", j);
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
@@ -442,13 +460,11 @@ namespace COP0 {
 
 		if (j > 47)
 		{
-			Console.Warning("TLBWR with random > 47! (%d)", j);
+			LogTLBEvent("TLBWR_OOB", j);
 			return;
 		}
 
-		DevCon.Warning("COP0_TLBWR %d:%x,%x,%x,%x\n",
-			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
-			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		LogTLBEvent("TLBWR", j);
 
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
@@ -472,6 +488,7 @@ namespace COP0 {
 
 		EntryHi32.u = cpuRegs.CP0.n.EntryHi;
 
+		LogTLBEvent("TLBP_REQ", -1);
 		cpuRegs.CP0.n.Index = 0xFFFFFFFF;
 		for (i = 0; i < 48; i++)
 		{
@@ -483,6 +500,7 @@ namespace COP0 {
 		}
 		if (cpuRegs.CP0.n.Index == 0xFFFFFFFF)
 			cpuRegs.CP0.n.Index = 0x80000000;
+		LogTLBEvent("TLBP_RES", (cpuRegs.CP0.n.Index & 0x80000000) ? -1 : static_cast<s32>(cpuRegs.CP0.n.Index & 0x3f));
 	}
 
 	void MFC0()

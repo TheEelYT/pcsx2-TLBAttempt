@@ -140,6 +140,8 @@ DebugSettingsWidget::DebugSettingsWidget(SettingsWindow* settings_dialog, QWidge
 	dialog()->registerWidgetHelp(m_logging.chkEER5900, tr("EE R5900"), tr("Unchecked"), tr("Log R5900 core instructions (excluding COPs). Requires modifying the PCSX2 source and enabling the interpreter."));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_logging.chkEECOP0, "EmuCore/TraceLog", "EE.cop0", false);
 	dialog()->registerWidgetHelp(m_logging.chkEECOP0, tr("EE COP0"), tr("Unchecked"), tr("Log COP0 (MMU, CPU status, etc) instructions."));
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_logging.chkEETLBMMU, "EmuCore/TraceLog", "EE.tlbmmu", false);
+	dialog()->registerWidgetHelp(m_logging.chkEETLBMMU, tr("EE TLB/MMU"), tr("Unchecked"), tr("Log detailed EE TLB/MMU event traces in normalized single-line format."));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_logging.chkEECOP1, "EmuCore/TraceLog", "EE.cop1", false);
 	dialog()->registerWidgetHelp(m_logging.chkEECOP1, tr("EE COP1"), tr("Unchecked"), tr("Log COP1 (FPU) instructions."));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_logging.chkEECOP2, "EmuCore/TraceLog", "EE.cop2", false);
@@ -242,6 +244,7 @@ void DebugSettingsWidget::onLoggingEnableChanged()
 	m_logging.chkEEMemory->setEnabled(enabled);
 	m_logging.chkEER5900->setEnabled(enabled);
 	m_logging.chkEECOP0->setEnabled(enabled);
+	m_logging.chkEETLBMMU->setEnabled(enabled);
 	m_logging.chkEECOP1->setEnabled(enabled);
 	m_logging.chkEECOP2->setEnabled(enabled);
 	m_logging.chkEECache->setEnabled(enabled);

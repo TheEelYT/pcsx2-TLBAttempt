@@ -126,6 +126,8 @@ static const LogDescriptor
 
 	LD_EE_COP0 = {"COP0", "COP0", "Disasm of COP0 instructions (MMU, cpu and dma status, etc)."},
 
+	LD_EE_TLBMMU = {"TLBMMU", "TLB/MMU", "Detailed EE TLB/MMU operations and state transitions."},
+
 	LD_EE_COP1 = {"FPU", "COP1/FPU", "Disasm of the EE's floating point unit (FPU) only."},
 
 	LD_EE_COP2 = {"VUmacro", "COP2/VUmacro", "Disasm of the EE's VU0macro co-processor instructions."},
@@ -201,6 +203,7 @@ TraceLogPack::EE_PACK::EE_PACK()
 
 	, R5900(LD_EE_R5900)
 	, COP0(LD_EE_COP0)
+	, TLBMMU(LD_EE_TLBMMU)
 	, COP1(LD_EE_COP1)
 	, COP2(LD_EE_COP2)
 	, Cache(LD_EE_Cache)
