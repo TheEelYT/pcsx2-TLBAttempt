@@ -22,11 +22,18 @@ class MemoryCardProtocol
 {
 private:
 	PS1MemoryCardState ps1McState;
+	std::array<u8, 16> authDexKey = {0x17, 0x39, 0xd3, 0xbc, 0xd0, 0x2c, 0x18, 0x07, 0x4b, 0x17, 0xf0, 0xea, 0xc4, 0x66, 0x30, 0xf9};
+	std::array<u8, 16> authCexKey = {0x06, 0x46, 0x7a, 0x6c, 0x5b, 0x9b, 0x82, 0x77, 0x39, 0x0f, 0x78, 0xb7, 0xf2, 0xc6, 0xa5, 0x20};
+	std::array<u8, 16>* authCurrentKey = &authDexKey;
+	std::array<u8, 9> authCryptBuffer = {};
+	u8 authCryptOffset = 0;
+	bool authCryptReceive = false;
 
 	bool PS1Fail();
 	void The2bTerminator(size_t length);
 	void ReadWriteIncrement(size_t length);
 	void RecalculatePS1Addr();
+	void AuthXorDataFrame();
 
 public:
 	void ResetPS1State();
@@ -47,7 +54,9 @@ public:
 	void EraseBlock();
 	void UnknownBoot();
 	void AuthXor();
+	void AuthCrypt();
 	void AuthF3();
+	void AuthKeySelect();
 	void AuthF7();
 };
 

@@ -62,8 +62,12 @@ namespace MemcardCommand
 	static constexpr u8 ERASE_BLOCK = 0x82;
 	static constexpr u8 UNKNOWN_BOOT = 0xbf;
 	static constexpr u8 AUTH_XOR = 0xf0;
+	static constexpr u8 AUTH_CRYPT_1 = 0xf1;
+	static constexpr u8 AUTH_CRYPT_2 = 0xf2;
 	static constexpr u8 AUTH_F3 = 0xf3;
-	static constexpr u8 AUTH_F7 = 0xf7;
+	// Behavior derived from PCSX2 PR #4274: this is key selection, not generic auth.
+	static constexpr u8 AUTH_KEY_SELECT = 0xf7;
+	static constexpr u8 AUTH_F7 = AUTH_KEY_SELECT;
 } // namespace MemcardCommand
 
 enum class Sio0Interrupt
