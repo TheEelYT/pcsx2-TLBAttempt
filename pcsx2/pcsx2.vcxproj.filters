@@ -1373,8 +1373,17 @@
     <ClCompile Include="SIO\Memcard\MemoryCardFolder.cpp">
       <Filter>System\Ps2\Iop\SIO\Memcard</Filter>
     </ClCompile>
+    <ClCompile Include="SIO\Memcard\MemoryCardAuthProvider.cpp">
+      <Filter>System\Ps2\Iop\SIO\Memcard</Filter>
+    </ClCompile>
     <ClCompile Include="SIO\Memcard\MemoryCardProtocol.cpp">
       <Filter>System\Ps2\Iop\SIO\Memcard</Filter>
+    </ClCompile>
+    <ClCompile Include="Crypto\MagicGateCrypto.cpp">
+      <Filter>Misc</Filter>
+    </ClCompile>
+    <ClCompile Include="..\3rdparty\crypto\des\des.cpp">
+      <Filter>Misc</Filter>
     </ClCompile>
     <ClCompile Include="SIO\Pad\PadBase.cpp">
       <Filter>System\Ps2\Iop\SIO\PAD</Filter>
@@ -2328,8 +2337,14 @@
     <ClInclude Include="SIO\Memcard\MemoryCardFolder.h">
       <Filter>System\Ps2\Iop\SIO\Memcard</Filter>
     </ClInclude>
+    <ClInclude Include="SIO\Memcard\MemoryCardAuthProvider.h">
+      <Filter>System\Ps2\Iop\SIO\Memcard</Filter>
+    </ClInclude>
     <ClInclude Include="SIO\Memcard\MemoryCardProtocol.h">
       <Filter>System\Ps2\Iop\SIO\Memcard</Filter>
+    </ClInclude>
+    <ClInclude Include="Crypto\MagicGateCrypto.h">
+      <Filter>Misc</Filter>
     </ClInclude>
     <ClInclude Include="SIO\Pad\PadBase.h">
       <Filter>System\Ps2\Iop\SIO\PAD</Filter>
