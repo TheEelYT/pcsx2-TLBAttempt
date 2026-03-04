@@ -70,6 +70,26 @@ namespace MemcardCommand
 	static constexpr u8 AUTH_F7 = AUTH_KEY_SELECT;
 } // namespace MemcardCommand
 
+namespace MemcardAuthMode
+{
+	// legacy equivalent of PR #4274 SIO_MEMCARD_CRYPT / SIO_MEMCARD_KEY_SELECT.
+	static constexpr u8 XOR_DATA_FRAME_1 = 0x01;
+	static constexpr u8 XOR_DATA_FRAME_2 = 0x02;
+	static constexpr u8 XOR_DATA_FRAME_4 = 0x04;
+	static constexpr u8 XOR_DATA_FRAME_0F = 0x0f;
+	static constexpr u8 XOR_DATA_FRAME_11 = 0x11;
+	static constexpr u8 XOR_DATA_FRAME_13 = 0x13;
+
+	static constexpr u8 CRYPT_REQUEST_40 = 0x40;
+	static constexpr u8 CRYPT_REQUEST_42 = 0x42;
+	static constexpr u8 CRYPT_REQUEST_50 = 0x50;
+	static constexpr u8 CRYPT_REQUEST_52 = 0x52;
+	static constexpr u8 CRYPT_PAYLOAD_DECRYPT = 0x41;
+	static constexpr u8 CRYPT_PAYLOAD_ENCRYPT = 0x51;
+	static constexpr u8 CRYPT_RESPONSE_43 = 0x43;
+	static constexpr u8 CRYPT_RESPONSE_53 = 0x53;
+} // namespace MemcardAuthMode
+
 enum class Sio0Interrupt
 {
 	TEST_EVENT,

@@ -7,6 +7,7 @@
 
 #include "common/Pcsx2Defs.h"
 #include "SIO/Memcard/MemoryCardAuthProvider.h"
+#include "SIO/SioTypes.h"
 
 struct PS1MemoryCardState
 {
@@ -26,9 +27,20 @@ private:
 	MemoryCardAuthProvider m_auth_provider;
 	MagicGateKeyset m_current_keyset = MagicGateKeyset::Retail;
 	std::array<u8, 9> authCryptBuffer = {};
-	u8 authCryptOffset = 0;
-	bool authCryptReceive = false;
+
+	enum class AuthCryptState
+	{
+		Idle,
+		AwaitingPayload,
+		PayloadReady,
+	};
+
+	AuthCryptState m_auth_crypt_state = AuthCryptState::Idle;
+	u8 m_auth_last_command = MemcardCommand::NOT_SET;
 	bool authMaterialLoaded = false;
+
+	void ResetAuthState();
+	void BeginCommand(u8 commandByte, bool cardPresent);
 
 	bool PS1Fail();
 	void The2bTerminator(size_t length);
@@ -59,6 +71,8 @@ public:
 	void AuthF3();
 	void AuthKeySelect();
 	void AuthF7();
+	void ResetAuthForDisconnect();
+	void NotifyCommandStart(u8 commandByte, bool cardPresent);
 };
 
 extern MemoryCardProtocol g_MemoryCardProtocol;

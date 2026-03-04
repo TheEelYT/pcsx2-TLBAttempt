@@ -23,6 +23,33 @@
 
 MemoryCardProtocol g_MemoryCardProtocol;
 
+void MemoryCardProtocol::ResetAuthState()
+{
+	m_auth_crypt_state = AuthCryptState::Idle;
+	m_auth_last_command = MemcardCommand::NOT_SET;
+	authCryptBuffer.fill(0);
+}
+
+void MemoryCardProtocol::BeginCommand(u8 commandByte, bool cardPresent)
+{
+	if (!cardPresent)
+	{
+		ResetAuthForDisconnect();
+		return;
+	}
+
+	if (commandByte == MemcardCommand::AUTH_F3)
+	{
+		ResetAuthState();
+		return;
+	}
+
+	if (commandByte != m_auth_last_command)
+		m_auth_crypt_state = AuthCryptState::Idle;
+
+	m_auth_last_command = commandByte;
+}
+
 // Check if the memcard is for PS1, and if we are working on a command sent over SIO2.
 // If so, return dead air.
 bool MemoryCardProtocol::PS1Fail()
@@ -67,6 +94,18 @@ void MemoryCardProtocol::RecalculatePS1Addr()
 	mcd->sectorAddr = ((ps1McState.sectorAddrMSB << 8) | ps1McState.sectorAddrLSB);
 	mcd->goodSector = (mcd->sectorAddr <= 0x03ff);
 	mcd->transferAddr = 128 * mcd->sectorAddr;
+}
+
+void MemoryCardProtocol::ResetAuthForDisconnect()
+{
+	ResetAuthState();
+	authMaterialLoaded = false;
+	m_current_keyset = MagicGateKeyset::Retail;
+}
+
+void MemoryCardProtocol::NotifyCommandStart(u8 commandByte, bool cardPresent)
+{
+	BeginCommand(commandByte, cardPresent);
 }
 
 void MemoryCardProtocol::ResetPS1State()
@@ -443,8 +482,9 @@ void MemoryCardProtocol::AuthXorDataFrame()
 
 	for (size_t xorCounter = 0; xorCounter < 8; xorCounter++)
 	{
-		const u8 toXOR = g_Sio2FifoIn.front();
-		g_Sio2FifoIn.pop_front();
+		const u8 toXOR = g_Sio2FifoIn.empty() ? 0x00 : g_Sio2FifoIn.front();
+		if (!g_Sio2FifoIn.empty())
+			g_Sio2FifoIn.pop_front();
 		xorResult ^= toXOR;
 		g_Sio2FifoOut.push_back(0x00);
 	}
@@ -457,17 +497,18 @@ void MemoryCardProtocol::AuthXor()
 {
 	MC_LOG.WriteLn("%s", __FUNCTION__);
 	PS1_FAIL();
-	const u8 modeByte = g_Sio2FifoIn.front();
-	g_Sio2FifoIn.pop_front();
+	const u8 modeByte = g_Sio2FifoIn.empty() ? 0x00 : g_Sio2FifoIn.front();
+	if (!g_Sio2FifoIn.empty())
+		g_Sio2FifoIn.pop_front();
 	switch (modeByte)
 	{
 		// Behavior derived from PCSX2 PR #4274: XOR phase with 0x2B+terminator framing.
-		case 0x01:
-		case 0x02:
-		case 0x04:
-		case 0x0f:
-		case 0x11:
-		case 0x13:
+		case MemcardAuthMode::XOR_DATA_FRAME_1:
+		case MemcardAuthMode::XOR_DATA_FRAME_2:
+		case MemcardAuthMode::XOR_DATA_FRAME_4:
+		case MemcardAuthMode::XOR_DATA_FRAME_0F:
+		case MemcardAuthMode::XOR_DATA_FRAME_11:
+		case MemcardAuthMode::XOR_DATA_FRAME_13:
 			AuthXorDataFrame();
 			break;
 		case 0x00:
@@ -499,39 +540,51 @@ void MemoryCardProtocol::AuthCrypt()
 {
 	MC_LOG.WriteLn("%s", __FUNCTION__);
 	PS1_FAIL();
-	const u8 modeByte = g_Sio2FifoIn.front();
-	g_Sio2FifoIn.pop_front();
+	const u8 modeByte = g_Sio2FifoIn.empty() ? 0x00 : g_Sio2FifoIn.front();
+	if (!g_Sio2FifoIn.empty())
+		g_Sio2FifoIn.pop_front();
 
 	switch (modeByte)
 	{
 		// Behavior derived from PCSX2 PR #4274: command windows for crypt receive/send.
-		case 0x40:
-		case 0x42:
-		case 0x50:
-		case 0x52:
-			authCryptReceive = false;
+		case MemcardAuthMode::CRYPT_REQUEST_40:
+		case MemcardAuthMode::CRYPT_REQUEST_42:
+		case MemcardAuthMode::CRYPT_REQUEST_50:
+		case MemcardAuthMode::CRYPT_REQUEST_52:
+			m_auth_crypt_state = AuthCryptState::AwaitingPayload;
 			AuthXorDataFrame();
 			break;
-		case 0x41:
-		case 0x51:
+		case MemcardAuthMode::CRYPT_PAYLOAD_DECRYPT:
+		case MemcardAuthMode::CRYPT_PAYLOAD_ENCRYPT:
 		{
-			authCryptReceive = true;
-			authCryptOffset = 0;
-			while (!g_Sio2FifoIn.empty() && authCryptOffset < authCryptBuffer.size())
+			std::array<u8, 9> incoming = {};
+			u8 incoming_size = 0;
+			while (!g_Sio2FifoIn.empty() && incoming_size < incoming.size())
 			{
-				authCryptBuffer[authCryptOffset++] = g_Sio2FifoIn.front();
+				incoming[incoming_size++] = g_Sio2FifoIn.front();
 				g_Sio2FifoIn.pop_front();
 			}
 
+			if (incoming_size >= 8)
+			{
+				std::copy_n(incoming.begin(), 8, authCryptBuffer.begin());
+				m_auth_crypt_state = AuthCryptState::PayloadReady;
+			}
+			else
+			{
+				authCryptBuffer.fill(0);
+				m_auth_crypt_state = AuthCryptState::Idle;
+			}
+
 			// Adapted crypto backend for PR #4274 behavior: shared internal DES/2DES API.
-			if (authMaterialLoaded && authCryptOffset >= 8)
+			if (authMaterialLoaded && m_auth_crypt_state == AuthCryptState::PayloadReady)
 			{
 				const MagicGateMaterial& material = m_auth_provider.GetMaterial(m_current_keyset);
 				MagicGateCrypto::Block8 input = {};
 				MagicGateCrypto::Block8 output = {};
 				std::copy_n(authCryptBuffer.begin(), 8, input.begin());
 
-				if (modeByte == 0x41)
+				if (modeByte == MemcardAuthMode::CRYPT_PAYLOAD_DECRYPT)
 					MagicGateCrypto::TwoDesDecrypt(material.key, input, &output);
 				else
 					MagicGateCrypto::TwoDesEncrypt(material.key, input, &output);
@@ -542,9 +595,8 @@ void MemoryCardProtocol::AuthCrypt()
 			The2bTerminator(5);
 			break;
 		}
-		case 0x43:
-		case 0x53:
-			authCryptReceive = false;
+		case MemcardAuthMode::CRYPT_RESPONSE_43:
+		case MemcardAuthMode::CRYPT_RESPONSE_53:
 			if (!authMaterialLoaded)
 				WARNING_LOG("MagicGate: crypt response requested without available key material; returning framed zero data.");
 			g_Sio2FifoOut.push_back(0x00);
@@ -554,7 +606,7 @@ void MemoryCardProtocol::AuthCrypt()
 			g_Sio2FifoOut.push_back(mcd->term);
 			break;
 		default:
-			authCryptReceive = false;
+			m_auth_crypt_state = AuthCryptState::Idle;
 			The2bTerminator(5);
 			break;
 	}
@@ -574,6 +626,7 @@ void MemoryCardProtocol::AuthF3()
 	}
 	else
 	{
+		ResetAuthState();
 		m_auth_provider.Refresh();
 		m_current_keyset = m_auth_provider.GetDefaultKeyset();
 		const MagicGateMaterial& material = m_auth_provider.GetMaterial(m_current_keyset);
@@ -598,8 +651,9 @@ void MemoryCardProtocol::AuthKeySelect()
 {
 	MC_LOG.WriteLn("%s", __FUNCTION__);
 	PS1_FAIL();
-	const u8 keyIndex = g_Sio2FifoIn.front();
-	g_Sio2FifoIn.pop_front();
+	const u8 keyIndex = g_Sio2FifoIn.empty() ? 0x00 : g_Sio2FifoIn.front();
+	if (!g_Sio2FifoIn.empty())
+		g_Sio2FifoIn.pop_front();
 	MagicGateKeyset requested_keyset = m_current_keyset;
 
 	if (keyIndex == 0x01)
@@ -626,6 +680,7 @@ void MemoryCardProtocol::AuthKeySelect()
 		authCryptBuffer = material.iv;
 	}
 
+	// legacy equivalent of PR #4274 SIO_MEMCARD_CRYPT / SIO_MEMCARD_KEY_SELECT.
 	// Behavior derived from PCSX2 PR #4274: key select command acks with short 0x2B frame.
 	The2bTerminator(5);
 }
