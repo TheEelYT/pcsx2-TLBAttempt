@@ -497,6 +497,7 @@ struct TraceLogsEE
 		mskpath3 : 1,
 		r5900 : 1,
 		cop0 : 1,
+		tlbmmu : 1,
 		cop1 : 1,
 		cop2 : 1,
 		cache : 1,
