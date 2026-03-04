@@ -34,6 +34,76 @@ void WriteCP0Config(u32 value)
 	cpuRegs.CP0.n.Config |= 0x440;
 }
 
+void WriteCP0Index(u32 value)
+{
+	// Index uses 6 entry bits (0-47 valid) and probe-failure bit31; bits 6-30 are reserved.
+	cpuRegs.CP0.n.Index = value & 0x8000003f;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=Index write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.Index);
+}
+
+void WriteCP0Random(u32 value)
+{
+	// Random is a 6-bit TLB index on the EE (48 entries), upper bits are reserved.
+	cpuRegs.CP0.n.Random = value & 0x3f;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=Random write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.Random);
+}
+
+void WriteCP0EntryLo0(u32 value)
+{
+	// EntryLo0 exposes G/V/D/C/PFN plus the scratchpad S bit (bit31); bit26-30 are reserved.
+	cpuRegs.CP0.n.EntryLo0 = value & 0x83ffffff;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=EntryLo0 write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.EntryLo0);
+}
+
+void WriteCP0EntryLo1(u32 value)
+{
+	// EntryLo1 exposes G/V/D/C/PFN; bit26-31 are reserved.
+	cpuRegs.CP0.n.EntryLo1 = value & 0x03ffffff;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=EntryLo1 write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.EntryLo1);
+}
+
+void WriteCP0Context(u32 value)
+{
+	// Context keeps PTEBase in bits31-23 and BadVPN2 in bits22-4; bits3-0 are reserved.
+	cpuRegs.CP0.n.Context = value & 0xffffffF0;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=Context write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.Context);
+}
+
+void WriteCP0PageMask(u32 value)
+{
+	// PageMask uses bits24-13 (12 mask bits); all remaining bits are reserved.
+	cpuRegs.CP0.n.PageMask = value & 0x01ffe000;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=PageMask write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.PageMask);
+}
+
+void WriteCP0Wired(u32 value)
+{
+	// Wired uses 6 bits on EE (0-47 entries are addressable by TLBWI/TLBWR); upper bits are reserved.
+	const u32 wired = value & 0x3f;
+	cpuRegs.CP0.n.Wired = wired;
+
+	// Random must stay within the writable range [Wired, 47] and never exceed the 48-entry TLB.
+	if (wired <= 47)
+	{
+		if (cpuRegs.CP0.n.Random < wired || cpuRegs.CP0.n.Random > 47)
+			cpuRegs.CP0.n.Random = 47;
+	}
+	else
+	{
+		// If Wired is outside implemented entries, pin Random to the top valid entry.
+		cpuRegs.CP0.n.Random = 47;
+	}
+
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=Wired write=%08X result=%08X random=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.Wired, cpuRegs.CP0.n.Random);
+}
+
+void WriteCP0EntryHi(u32 value)
+{
+	// EntryHi keeps VPN2 (31-13) and ASID (7-0); bits12-8 are reserved.
+	cpuRegs.CP0.n.EntryHi = value & 0xffffe0ff;
+	TLB_LOG("TLB_CP0 cyc=%u pc=%08X reg=EntryHi write=%08X result=%08X", cpuRegs.cycle, cpuRegs.pc, value, cpuRegs.CP0.n.EntryHi);
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 // Performance Counters Update Stuff!
 //
@@ -561,9 +631,41 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
 		switch (_Rd_)
 		{
+			case 0:
+				WriteCP0Index(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
+			case 1:
+				WriteCP0Random(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
+			case 2:
+				WriteCP0EntryLo0(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
+			case 3:
+				WriteCP0EntryLo1(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
+			case 4:
+				WriteCP0Context(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
+			case 5:
+				WriteCP0PageMask(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
+			case 6:
+				WriteCP0Wired(cpuRegs.GPR.r[_Rt_].UL[0]);
+				break;
+
 			case 9:
 				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
 				cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
+				break;
+
+			case 10:
+				WriteCP0EntryHi(cpuRegs.GPR.r[_Rt_].UL[0]);
 				break;
 
 			case 12:
