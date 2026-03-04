@@ -117,10 +117,25 @@ struct VTLBFastmemCompactLogState
 
 static VTLBFastmemCompactLogState s_vtlb_fastmem_log_state;
 
+struct VTLBMapCompactLogState
+{
+	bool active = false;
+	bool is_unmap = false;
+	u32 start_vaddr = 0;
+	u32 last_vaddr = 0;
+	u32 start_paddr = 0;
+	u32 last_paddr = 0;
+	u32 size_each = 0;
+	u32 count = 0;
+};
+
+static VTLBMapCompactLogState s_vtlb_map_log_state;
+
 static constexpr u32 VTLB_FAULT_LOG_BURST_LIMIT = 8;
 static constexpr u32 VTLB_FAULT_LOG_SUMMARY_INTERVAL = 1024;
 
 static void vtlb_LogEventCompact(std::string_view event, std::string_view details);
+static void vtlb_FlushCompactLogState();
 
 static void vtlb_FlushFastmemCompactLog()
 {
@@ -156,6 +171,7 @@ static void vtlb_LogFastmemCompact(bool is_create, u32 vaddr, u32 mainmem_offset
 	const bool contiguous = (state.last_vaddr + VTLB_PAGE_SIZE == vaddr) && (state.last_mainmem + VTLB_PAGE_SIZE == mainmem_offset);
 	if (state.is_create != is_create || state.prot != prot || !contiguous)
 	{
+		vtlb_FlushCompactLogState();
 		vtlb_FlushFastmemCompactLog();
 		state.active = true;
 		state.is_create = is_create;
@@ -171,6 +187,102 @@ static void vtlb_LogFastmemCompact(bool is_create, u32 vaddr, u32 mainmem_offset
 	state.last_vaddr = vaddr;
 	state.last_mainmem = mainmem_offset;
 	state.count++;
+}
+
+static void vtlb_FlushMapCompactLog()
+{
+	if (!s_vtlb_map_log_state.active)
+		return;
+
+	const VTLBMapCompactLogState& state = s_vtlb_map_log_state;
+	if (state.is_unmap)
+	{
+		vtlb_LogEventCompact("vmap_unmap", fmt::format("batch count={} vaddr={:08X}-{:08X} size_each={:X} total={:X}",
+			state.count, state.start_vaddr, state.last_vaddr + state.size_each, state.size_each, state.count * state.size_each));
+	}
+	else
+	{
+		vtlb_LogEventCompact("vmap", fmt::format("batch count={} vaddr={:08X}-{:08X} paddr={:08X}-{:08X} size_each={:X} total={:X}",
+			state.count, state.start_vaddr, state.last_vaddr + state.size_each,
+			state.start_paddr, state.last_paddr + state.size_each,
+			state.size_each, state.count * state.size_each));
+	}
+
+	s_vtlb_map_log_state = {};
+}
+
+static void vtlb_LogVMapCompact(u32 vaddr, u32 paddr, u32 size)
+{
+	VTLBMapCompactLogState& state = s_vtlb_map_log_state;
+	if (!state.active)
+	{
+		state.active = true;
+		state.is_unmap = false;
+		state.start_vaddr = vaddr;
+		state.last_vaddr = vaddr;
+		state.start_paddr = paddr;
+		state.last_paddr = paddr;
+		state.size_each = size;
+		state.count = 1;
+		return;
+	}
+
+	const bool contiguous = (!state.is_unmap && state.size_each == size &&
+		state.last_vaddr + state.size_each == vaddr && state.last_paddr + state.size_each == paddr);
+	if (!contiguous)
+	{
+		vtlb_FlushMapCompactLog();
+		state.active = true;
+		state.is_unmap = false;
+		state.start_vaddr = vaddr;
+		state.last_vaddr = vaddr;
+		state.start_paddr = paddr;
+		state.last_paddr = paddr;
+		state.size_each = size;
+		state.count = 1;
+		return;
+	}
+
+	state.last_vaddr = vaddr;
+	state.last_paddr = paddr;
+	state.count++;
+}
+
+static void vtlb_LogVMapUnmapCompact(u32 vaddr, u32 size)
+{
+	VTLBMapCompactLogState& state = s_vtlb_map_log_state;
+	if (!state.active)
+	{
+		state.active = true;
+		state.is_unmap = true;
+		state.start_vaddr = vaddr;
+		state.last_vaddr = vaddr;
+		state.size_each = size;
+		state.count = 1;
+		return;
+	}
+
+	const bool contiguous = (state.is_unmap && state.size_each == size && state.last_vaddr + state.size_each == vaddr);
+	if (!contiguous)
+	{
+		vtlb_FlushMapCompactLog();
+		state.active = true;
+		state.is_unmap = true;
+		state.start_vaddr = vaddr;
+		state.last_vaddr = vaddr;
+		state.size_each = size;
+		state.count = 1;
+		return;
+	}
+
+	state.last_vaddr = vaddr;
+	state.count++;
+}
+
+static void vtlb_FlushCompactLogState()
+{
+	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushMapCompactLog();
 }
 
 static bool vtlb_ShouldLogCompact()
@@ -261,6 +373,7 @@ static void vtlb_LogCpuStateSnapshot(std::string_view event, u32 addr, u32 mode)
 		state.suppressed_count = 0;
 	}
 
+	vtlb_FlushCompactLogState();
 	vtlb_FlushFastmemCompactLog();
 	const std::string compact = fmt::format("pc={:08X} bd={} access={} vaddr={:08X}",
 		cpuRegs.pc, cpuRegs.branch ? 1 : 0, vtlb_AccessModeToString(mode), addr);
@@ -1345,8 +1458,7 @@ void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 	const u32 original_vaddr = vaddr;
 	const u32 original_paddr = paddr;
 	const u32 original_size = size;
-	vtlb_FlushFastmemCompactLog();
-	vtlb_LogEventCompact("vmap", fmt::format("begin vaddr={:08X} paddr={:08X} size={:X}", original_vaddr, original_paddr, original_size));
+	vtlb_LogVMapCompact(original_vaddr, original_paddr, original_size);
 	vtlb_LogEventVerbose("vmap", fmt::format("begin_mapping={{vaddr:0x{:08X}, paddr:0x{:08X}, size:0x{:X}}}", original_vaddr, original_paddr, original_size));
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (paddr & VTLB_PAGE_MASK));
@@ -1392,15 +1504,13 @@ void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 		size -= VTLB_PAGE_SIZE;
 	}
 
-	vtlb_FlushFastmemCompactLog();
-	vtlb_LogEventCompact("vmap", fmt::format("end vaddr={:08X} paddr={:08X} size={:X}", original_vaddr, original_paddr, original_size));
 }
 
 void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 {
 	const u32 original_vaddr = vaddr;
 	const u32 original_size = size;
-	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushCompactLogState();
 	vtlb_LogEventCompact("vmap_buffer", fmt::format("begin vaddr={:08X} size={:X} target=ptr", original_vaddr, original_size));
 	vtlb_LogEventVerbose("vmap_buffer", fmt::format("begin_mapping={{vaddr:0x{:08X}, size:0x{:X}, buffer:0x{:X}}}", original_vaddr, original_size, static_cast<u64>(reinterpret_cast<uptr>(buffer))));
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
@@ -1433,7 +1543,7 @@ void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 		size -= VTLB_PAGE_SIZE;
 	}
 
-	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushCompactLogState();
 	vtlb_LogEventCompact("vmap_buffer", fmt::format("end vaddr={:08X} size={:X}", original_vaddr, original_size));
 }
 
@@ -1441,8 +1551,7 @@ void vtlb_VMapUnmap(u32 vaddr, u32 size)
 {
 	const u32 original_vaddr = vaddr;
 	const u32 original_size = size;
-	vtlb_FlushFastmemCompactLog();
-	vtlb_LogEventCompact("vmap_unmap", fmt::format("begin vaddr={:08X} size={:X}", original_vaddr, original_size));
+	vtlb_LogVMapUnmapCompact(original_vaddr, original_size);
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
 
@@ -1457,8 +1566,6 @@ void vtlb_VMapUnmap(u32 vaddr, u32 size)
 		size -= VTLB_PAGE_SIZE;
 	}
 
-	vtlb_FlushFastmemCompactLog();
-	vtlb_LogEventCompact("vmap_unmap", fmt::format("end vaddr={:08X} size={:X}", original_vaddr, original_size));
 }
 
 // vtlb_Init -- Clears vtlb handlers and memory mappings.
@@ -1502,19 +1609,20 @@ void vtlb_Init()
 // This function should probably be part of the COP0 rather than here in VTLB.
 void vtlb_Reset()
 {
-	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushCompactLogState();
 	vtlb_LogEventCompact("reset", "begin");
 	s_vtlb_miss_log_state = {};
 	s_vtlb_bus_error_log_state = {};
 	vtlb_RemoveFastmemMappings();
 	for (int i = 0; i < 48; i++)
 		UnmapTLB(tlb[i], i);
-	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushCompactLogState();
 	vtlb_LogEventCompact("reset", "end");
 }
 
 void vtlb_Shutdown()
 {
+	vtlb_FlushCompactLogState();
 	vtlb_RemoveFastmemMappings();
 	s_fastmem_backpatch_info.clear();
 	s_fastmem_faulting_pcs.clear();
@@ -1523,7 +1631,7 @@ void vtlb_Shutdown()
 void vtlb_ResetFastmem()
 {
 	DevCon.WriteLn("Resetting fastmem mappings...");
-	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushCompactLogState();
 	vtlb_LogEventCompact("reset_fastmem", "begin");
 
 	vtlb_RemoveFastmemMappings();
@@ -1532,7 +1640,7 @@ void vtlb_ResetFastmem()
 
 	if (!CHECK_FASTMEM || !CHECK_EEREC || !vtlbdata.vmap)
 	{
-		vtlb_FlushFastmemCompactLog();
+		vtlb_FlushCompactLogState();
 		vtlb_LogEventCompact("reset_fastmem", "end skipped=1");
 		return;
 	}
@@ -1554,7 +1662,7 @@ void vtlb_ResetFastmem()
 		if (vtlb_GetMainMemoryOffsetFromPtr(vm.assumePtr(vaddr), &mainmem_offset, &mainmem_size, &prot))
 			vtlb_CreateFastmemMapping(vaddr, mainmem_offset, prot);
 	}
-	vtlb_FlushFastmemCompactLog();
+	vtlb_FlushCompactLogState();
 	vtlb_LogEventCompact("reset_fastmem", "end skipped=0");
 }
 
