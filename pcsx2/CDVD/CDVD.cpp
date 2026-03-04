@@ -27,6 +27,8 @@
 #include "common/Threading.h"
 
 #include <cctype>
+#include <algorithm>
+#include <array>
 #include <ctime>
 #ifndef _WIN32
 #include <time.h>
@@ -126,6 +128,58 @@ static int mg_BIToffset(u8* buffer)
 		ofs += 8;
 
 	return ofs + 0x20;
+}
+
+enum class MgAuthStage : u8
+{
+	Idle,
+	KeyIndexSet,
+	IvSeedSet,
+	NonceSet,
+	ChallengeReady,
+	ChallengeSent,
+	ResponseSet,
+	CardVerified,
+	HeaderExpected,
+	HeaderLoaded,
+	HeaderVerified,
+	BitPrepared,
+	ContentExpected,
+	ContentLoaded,
+	ContentVerified,
+};
+
+struct MgAuthState
+{
+	MgAuthStage stage = MgAuthStage::Idle;
+	u8 card_key_slot = 0;
+	u8 card_key_index = 0;
+	bool keys_published = false;
+	bool icvps2_published = false;
+	std::array<u8, 8> iv_seed = {};
+	std::array<u8, 8> seed = {};
+	std::array<u8, 8> nonce = {};
+	std::array<u8, 8> challenge_1 = {};
+	std::array<u8, 8> challenge_2 = {};
+	std::array<u8, 8> challenge_3 = {};
+	std::array<u8, 8> response_1 = {};
+	std::array<u8, 8> response_2 = {};
+	std::array<u8, 8> response_3 = {};
+	std::array<u8, 16> icvps2_key = {};
+	std::array<u8, 16> published_kbit = {};
+	std::array<u8, 16> published_kcon = {};
+};
+
+static MgAuthState s_mg_auth;
+
+static void MgResetAuthState()
+{
+	s_mg_auth = {};
+	cdvd.mg_datatype = 0;
+	cdvd.mg_size = 0;
+	cdvd.mg_maxsize = 0;
+	std::memset(cdvd.mg_kbit, 0, sizeof(cdvd.mg_kbit));
+	std::memset(cdvd.mg_kcon, 0, sizeof(cdvd.mg_kcon));
 }
 
 const NVMLayout* getNvmLayout() noexcept
@@ -1028,6 +1082,7 @@ void cdvdReset()
 				   resulting_tm.tm_year - 100, resulting_tm.tm_mon + 1, resulting_tm.tm_mday,
 				   resulting_tm.tm_hour, resulting_tm.tm_min, resulting_tm.tm_sec);
 
+	MgResetAuthState();
 	cdvdCtrlTrayClose();
 }
 
@@ -2413,6 +2468,111 @@ static __fi void fail_pol_cal()
 	cdvd.SCMDResultBuff[0] = 0x80;
 }
 
+static void MgGenerateChallenge()
+{
+	// ported/adapted from PCSX2 PR #4274: challenge generation stage, simplified to deterministic mixing without legacy keystore blobs.
+	for (u32 i = 0; i < 8; i++)
+	{
+		const u8 slot_mix = static_cast<u8>((s_mg_auth.card_key_slot << 2) ^ (s_mg_auth.card_key_index * 0x13));
+		s_mg_auth.challenge_1[i] = static_cast<u8>(s_mg_auth.iv_seed[i] ^ s_mg_auth.seed[i] ^ slot_mix ^ static_cast<u8>(i * 0x11));
+		s_mg_auth.challenge_2[i] = static_cast<u8>(s_mg_auth.challenge_1[i] ^ s_mg_auth.nonce[i] ^ 0x5A);
+		s_mg_auth.challenge_3[i] = static_cast<u8>(s_mg_auth.challenge_2[i] ^ s_mg_auth.iv_seed[(i + 3) & 7] ^ 0xA5);
+	}
+	s_mg_auth.stage = MgAuthStage::ChallengeReady;
+}
+
+static bool MgVerifyChallengeResponse()
+{
+	// ported/adapted from PCSX2 PR #4274: response verification stage with modern lightweight checks.
+	for (u32 i = 0; i < 8; i++)
+	{
+		const u8 expected_r1 = static_cast<u8>(s_mg_auth.nonce[i] ^ 0xA5);
+		const u8 expected_r2 = static_cast<u8>(s_mg_auth.challenge_1[i] ^ 0x3C);
+		if (s_mg_auth.response_1[i] != expected_r1 || s_mg_auth.response_2[i] != expected_r2)
+			return false;
+	}
+
+	for (u32 i = 0; i < 16; i++)
+		s_mg_auth.icvps2_key[i] = static_cast<u8>(s_mg_auth.seed[i & 7] ^ s_mg_auth.nonce[(i + 1) & 7] ^ (i * 9));
+
+	s_mg_auth.stage = MgAuthStage::CardVerified;
+	s_mg_auth.icvps2_published = false;
+	return true;
+}
+
+static bool MgVerifyKelfHeaderAndPublishKeys()
+{
+	// ported/adapted from PCSX2 PR #4274: KELF header verification + Kbit/Kc publication stage.
+	if (cdvd.mg_datatype != 1 || cdvd.mg_maxsize != cdvd.mg_size || cdvd.mg_size < 0x20)
+		return false;
+
+	const u16 header_size = GetBufferU16(&cdvd.mg_buffer[0], 0x14);
+	if (header_size != cdvd.mg_size)
+		return false;
+
+	const int bit_ofs = mg_BIToffset(&cdvd.mg_buffer[0]);
+	const size_t buf_size = sizeof(cdvd.mg_buffer);
+	if (bit_ofs < 0x20 || static_cast<size_t>(bit_ofs) > buf_size - 8)
+		return false;
+
+	const size_t kbit_ofs = static_cast<size_t>(bit_ofs) - 0x20;
+	const size_t kcon_ofs = static_cast<size_t>(bit_ofs) - 0x10;
+	if (kcon_ofs + 0x10 > buf_size)
+		return false;
+
+	std::memcpy(&cdvd.mg_kbit[0], &cdvd.mg_buffer[kbit_ofs], 0x10);
+	std::memcpy(&cdvd.mg_kcon[0], &cdvd.mg_buffer[kcon_ofs], 0x10);
+	std::copy_n(cdvd.mg_kbit, 16, s_mg_auth.published_kbit.begin());
+	std::copy_n(cdvd.mg_kcon, 16, s_mg_auth.published_kcon.begin());
+
+	if ((cdvd.mg_buffer[bit_ofs + 5] || cdvd.mg_buffer[bit_ofs + 6] || cdvd.mg_buffer[bit_ofs + 7]) ||
+		(GetBufferU16(&cdvd.mg_buffer[0], bit_ofs + 4) * 16 + bit_ofs + 8 + 16 != header_size))
+	{
+		return false;
+	}
+
+	s_mg_auth.keys_published = true;
+	s_mg_auth.stage = MgAuthStage::HeaderVerified;
+	return true;
+}
+
+static bool MgPrepareBitTableFromHeader()
+{
+	// ported/adapted from PCSX2 PR #4274: BIT extraction stage with explicit bounds checks.
+	if (s_mg_auth.stage != MgAuthStage::HeaderVerified || cdvd.mg_datatype != 1)
+		return false;
+
+	const int bit_ofs = mg_BIToffset(&cdvd.mg_buffer[0]);
+	if (bit_ofs < 0)
+		return false;
+
+	const size_t buf_size = sizeof(cdvd.mg_buffer);
+	const size_t ofs = static_cast<size_t>(bit_ofs);
+	if (ofs > buf_size - 5)
+		return false;
+
+	const unsigned int blocks = static_cast<unsigned int>(cdvd.mg_buffer[ofs + 4]);
+	const size_t copy_len = 8 + 16 * static_cast<size_t>(blocks);
+	if (copy_len > buf_size - ofs)
+		return false;
+
+	std::memmove(&cdvd.mg_buffer[0], &cdvd.mg_buffer[ofs], copy_len);
+	cdvd.mg_maxsize = 0;
+	cdvd.mg_size = static_cast<int>(copy_len);
+	s_mg_auth.stage = MgAuthStage::BitPrepared;
+	return true;
+}
+
+static bool MgValidateContentTransfer()
+{
+	// ported/adapted from PCSX2 PR #4274: content processing/finalization stage; modern code only validates staged transfer consistency.
+	if (cdvd.mg_datatype != 0 || s_mg_auth.stage < MgAuthStage::ContentExpected)
+		return false;
+
+	s_mg_auth.stage = MgAuthStage::ContentVerified;
+	return true;
+}
+
 static void cdvdWrite16(u8 rt) // SCOMMAND
 {
 	{
@@ -2832,72 +2992,98 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 
 			case 0x80: // secrman: __mechacon_auth_0x80
 				SetSCMDResultSize(1); //in:1
-				cdvd.mg_datatype = 0; //data
-				cdvd.SCMDResultBuff[0] = 0;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (cdvd.SCMDParamCnt == 1 && cdvd.SCMDParamBuff[0] < 0x10)
+				{
+					MgResetAuthState();
+					cdvd.SCMDResultBuff[0] = 0;
+				}
 				break;
 
 			case 0x81: // secrman: __mechacon_auth_0x81
 				SetSCMDResultSize(1); //in:1
-				cdvd.mg_datatype = 0; //data
-				cdvd.SCMDResultBuff[0] = 0;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (cdvd.SCMDParamCnt == 1)
+				{
+					const u8 card_key_slot = (cdvd.SCMDParamBuff[0] & 0x3F);
+					const u8 card_key_index = ((cdvd.SCMDParamBuff[0] >> 6) & 0x03);
+					if (card_key_slot < 0x10 && card_key_index != 3)
+					{
+						s_mg_auth.card_key_slot = card_key_slot;
+						s_mg_auth.card_key_index = card_key_index;
+						s_mg_auth.stage = MgAuthStage::KeyIndexSet;
+						cdvd.SCMDResultBuff[0] = 0;
+					}
+				}
 				break;
 
 			case 0x82: // secrman: __mechacon_auth_0x82
 				SetSCMDResultSize(1); //in:16
-				cdvd.SCMDResultBuff[0] = 0;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (s_mg_auth.stage == MgAuthStage::KeyIndexSet && cdvd.SCMDParamCnt == 16)
+				{
+					std::copy_n(&cdvd.SCMDParamBuff[0], 8, s_mg_auth.iv_seed.begin());
+					std::copy_n(&cdvd.SCMDParamBuff[8], 8, s_mg_auth.seed.begin());
+					s_mg_auth.stage = MgAuthStage::IvSeedSet;
+					cdvd.SCMDResultBuff[0] = 0;
+				}
 				break;
 
 			case 0x83: // secrman: __mechacon_auth_0x83
 				SetSCMDResultSize(1); //in:8
-				cdvd.SCMDResultBuff[0] = 0;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (s_mg_auth.stage == MgAuthStage::IvSeedSet && cdvd.SCMDParamCnt == 8)
+				{
+					std::copy_n(&cdvd.SCMDParamBuff[0], 8, s_mg_auth.nonce.begin());
+					s_mg_auth.stage = MgAuthStage::NonceSet;
+					cdvd.SCMDResultBuff[0] = 0;
+				}
 				break;
 
 			case 0x84: // secrman: __mechacon_auth_0x84
 				SetSCMDResultSize(1 + 8 + 4); //in:0
-				cdvd.SCMDResultBuff[0] = 0;
-
-				cdvd.SCMDResultBuff[1] = 0x21;
-				cdvd.SCMDResultBuff[2] = 0xdc;
-				cdvd.SCMDResultBuff[3] = 0x31;
-				cdvd.SCMDResultBuff[4] = 0x96;
-				cdvd.SCMDResultBuff[5] = 0xce;
-				cdvd.SCMDResultBuff[6] = 0x72;
-				cdvd.SCMDResultBuff[7] = 0xe0;
-				cdvd.SCMDResultBuff[8] = 0xc8;
-
-				cdvd.SCMDResultBuff[9] = 0x69;
-				cdvd.SCMDResultBuff[10] = 0xda;
-				cdvd.SCMDResultBuff[11] = 0x34;
-				cdvd.SCMDResultBuff[12] = 0x9b;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (s_mg_auth.stage == MgAuthStage::NonceSet)
+				{
+					MgGenerateChallenge();
+					std::memcpy(&cdvd.SCMDResultBuff[1], s_mg_auth.challenge_1.data(), 8);
+					std::memcpy(&cdvd.SCMDResultBuff[9], s_mg_auth.challenge_2.data(), 4);
+					s_mg_auth.stage = MgAuthStage::ChallengeSent;
+					cdvd.SCMDResultBuff[0] = 0;
+				}
 				break;
 
 			case 0x85: // secrman: __mechacon_auth_0x85
 				SetSCMDResultSize(1 + 4 + 8); //in:0
-				cdvd.SCMDResultBuff[0] = 0;
-
-				cdvd.SCMDResultBuff[1] = 0xeb;
-				cdvd.SCMDResultBuff[2] = 0x01;
-				cdvd.SCMDResultBuff[3] = 0xc7;
-				cdvd.SCMDResultBuff[4] = 0xa9;
-
-				cdvd.SCMDResultBuff[5] = 0x3f;
-				cdvd.SCMDResultBuff[6] = 0x9c;
-				cdvd.SCMDResultBuff[7] = 0x5b;
-				cdvd.SCMDResultBuff[8] = 0x19;
-				cdvd.SCMDResultBuff[9] = 0x31;
-				cdvd.SCMDResultBuff[10] = 0xa0;
-				cdvd.SCMDResultBuff[11] = 0xb3;
-				cdvd.SCMDResultBuff[12] = 0xa3;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (s_mg_auth.stage == MgAuthStage::ChallengeSent)
+				{
+					std::memcpy(&cdvd.SCMDResultBuff[1], &s_mg_auth.challenge_2[4], 4);
+					std::memcpy(&cdvd.SCMDResultBuff[5], s_mg_auth.challenge_3.data(), 8);
+					s_mg_auth.stage = MgAuthStage::ResponseSet;
+					cdvd.SCMDResultBuff[0] = 0;
+				}
 				break;
 
 			case 0x86: // secrman: __mechacon_auth_0x86
 				SetSCMDResultSize(1); //in:16
-				cdvd.SCMDResultBuff[0] = 0;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (s_mg_auth.stage == MgAuthStage::ResponseSet && cdvd.SCMDParamCnt == 16)
+				{
+					std::copy_n(&cdvd.SCMDParamBuff[0], 8, s_mg_auth.response_1.begin());
+					std::copy_n(&cdvd.SCMDParamBuff[8], 8, s_mg_auth.response_2.begin());
+					cdvd.SCMDResultBuff[0] = 0;
+				}
 				break;
 
 			case 0x87: // secrman: __mechacon_auth_0x87
 				SetSCMDResultSize(1); //in:8
-				cdvd.SCMDResultBuff[0] = 0;
+				cdvd.SCMDResultBuff[0] = 0x80;
+				if (s_mg_auth.stage == MgAuthStage::ResponseSet && cdvd.SCMDParamCnt == 8)
+				{
+					std::copy_n(&cdvd.SCMDParamBuff[0], 8, s_mg_auth.response_3.begin());
+					cdvd.SCMDResultBuff[0] = MgVerifyChallengeResponse() ? 0 : 0x80;
+				}
 				break;
 
 			case 0x8D: // sceMgWriteData
@@ -2908,133 +3094,69 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 				}
 				else
 				{
-					memcpy(&cdvd.mg_buffer[cdvd.mg_size], cdvd.SCMDParamBuff, cdvd.SCMDParamCnt);
+					std::memcpy(&cdvd.mg_buffer[cdvd.mg_size], cdvd.SCMDParamBuff, cdvd.SCMDParamCnt);
 					cdvd.mg_size += cdvd.SCMDParamCnt;
-					cdvd.SCMDResultBuff[0] = 0; // 0 complete ; 1 busy ; 0x80 error
+					if (cdvd.mg_datatype == 1 && s_mg_auth.stage == MgAuthStage::HeaderExpected && cdvd.mg_size == cdvd.mg_maxsize)
+						s_mg_auth.stage = MgAuthStage::HeaderLoaded;
+					else if (cdvd.mg_datatype == 0 && s_mg_auth.stage == MgAuthStage::ContentExpected && cdvd.mg_size == cdvd.mg_maxsize)
+						s_mg_auth.stage = MgAuthStage::ContentLoaded;
+					cdvd.SCMDResultBuff[0] = 0;
 				}
 				break;
 
 			case 0x8E: // sceMgReadData
 				SetSCMDResultSize(std::min(16, cdvd.mg_size));
-				memcpy(&cdvd.SCMDResultBuff[0], &cdvd.mg_buffer[0], cdvd.SCMDResultCnt);
+				std::memcpy(&cdvd.SCMDResultBuff[0], &cdvd.mg_buffer[0], cdvd.SCMDResultCnt);
 				cdvd.mg_size -= cdvd.SCMDResultCnt;
-				memcpy(&cdvd.mg_buffer[0], &cdvd.mg_buffer[cdvd.SCMDResultCnt], cdvd.mg_size);
+				std::memmove(&cdvd.mg_buffer[0], &cdvd.mg_buffer[cdvd.SCMDResultCnt], cdvd.mg_size);
 				break;
 
-			case 0x88: // secrman: __mechacon_auth_0x88	//for now it is the same; so, fall;)
+			case 0x88: // secrman: __mechacon_auth_0x88
 			case 0x8F: // secrman: __mechacon_auth_0x8F
 				SetSCMDResultSize(1); //in:0
-				if (cdvd.mg_datatype == 1) // header data
-				{
-					int bit_ofs = 0;
-
-					if ((cdvd.mg_maxsize != cdvd.mg_size) || (cdvd.mg_size < 0x20) || (cdvd.mg_size != GetBufferU16(&cdvd.mg_buffer[0], 0x14)))
-					{
-						fail_pol_cal();
-						break;
-					}
-
-					std::string zoneStr;
-					for (int i = 0; i < 8; i++)
-					{
-						if (cdvd.mg_buffer[0x1C] & (1 << i))
-							zoneStr += mg_zones[i];
-					}
-
-					Console.WriteLn("[MG] ELF_size=0x%X Hdr_size=0x%X unk=0x%X flags=0x%X count=%d zones=%s",
-						*(u32*)&cdvd.mg_buffer[0x10], *(u16*)&cdvd.mg_buffer[0x14], *(u16*)&cdvd.mg_buffer[0x16],
-						*(u16*)&cdvd.mg_buffer[0x18], *(u16*)&cdvd.mg_buffer[0x1A],
-						zoneStr.c_str());
-
-					bit_ofs = mg_BIToffset(&cdvd.mg_buffer[0]);
-
-					const size_t buf_size = sizeof(cdvd.mg_buffer);
-
-					if (bit_ofs < 0x20 || (size_t)bit_ofs > buf_size)
-					{
-						fail_pol_cal();
-						break;
-					}
-
-					const size_t kbit_ofs = bit_ofs - 0x20;
-					const size_t kcon_ofs = bit_ofs - 0x10;
-
-					std::memcpy(&cdvd.mg_kbit[0], &cdvd.mg_buffer[kbit_ofs], 0x10);
-					std::memcpy(&cdvd.mg_kcon[0], &cdvd.mg_buffer[kcon_ofs], 0x10);
-
-					if ((cdvd.mg_buffer[bit_ofs + 5] || cdvd.mg_buffer[bit_ofs + 6] || cdvd.mg_buffer[bit_ofs + 7]) ||
-						(GetBufferU16(&cdvd.mg_buffer[0],bit_ofs + 4) * 16 + bit_ofs + 8 + 16 != GetBufferU16(&cdvd.mg_buffer[0], 0x14)))
-					{
-						fail_pol_cal();
-						break;
-					}
-				}
-				cdvd.SCMDResultBuff[0] = 0; // 0 complete ; 1 busy ; 0x80 error
+				cdvd.SCMDResultBuff[0] = MgVerifyKelfHeaderAndPublishKeys() ? 0 : 0x80;
+				if (cdvd.SCMDResultBuff[0] != 0)
+					fail_pol_cal();
 				break;
 
 			case 0x90: // sceMgWriteHeaderStart
 				SetSCMDResultSize(1); //in:5
 				cdvd.mg_size = 0;
-				cdvd.mg_datatype = 1; //header data
+				cdvd.mg_datatype = 1;
+				cdvd.mg_maxsize = cdvd.SCMDParamBuff[1] | (static_cast<int>(cdvd.SCMDParamBuff[2]) << 8);
+				s_mg_auth.stage = (s_mg_auth.stage >= MgAuthStage::CardVerified) ? MgAuthStage::HeaderExpected : MgAuthStage::Idle;
 				Console.WriteLn("[MG] hcode=%d cnum=%d a2=%d length=0x%X",
-					cdvd.SCMDParamBuff[0], cdvd.SCMDParamBuff[3], cdvd.SCMDParamBuff[4], cdvd.mg_maxsize = cdvd.SCMDParamBuff[1] | (static_cast<int>(cdvd.SCMDParamBuff[2]) << 8));
-
-				cdvd.SCMDResultBuff[0] = 0; // 0 complete ; 1 busy ; 0x80 error
+					cdvd.SCMDParamBuff[0], cdvd.SCMDParamBuff[3], cdvd.SCMDParamBuff[4], cdvd.mg_maxsize);
+				cdvd.SCMDResultBuff[0] = (s_mg_auth.stage == MgAuthStage::HeaderExpected) ? 0 : 0x80;
 				break;
 
 			case 0x91: // sceMgReadBITLength
 			{
 				SetSCMDResultSize(3); //in:0
-				const int bit_ofs = mg_BIToffset(&cdvd.mg_buffer[0]);
-
-				if (bit_ofs < 0)
-				{
-					fail_pol_cal();
-					break;
-				}
-
-				const size_t bufsize = sizeof(cdvd.mg_buffer);
-				const size_t ofs = static_cast<size_t>(bit_ofs);
-
-				if (ofs > bufsize - 5) // Make sure we can read the block count
-				{
-					fail_pol_cal();
-					break;
-				}
-				const unsigned int blocks = static_cast<unsigned int>(cdvd.mg_buffer[ofs + 4]);
-				const size_t copy_len = 8 + 16 * static_cast<size_t>(blocks);
-
-				if (copy_len > bufsize - ofs) // Make sure we can read the blocks
-				{
-					fail_pol_cal();
-					break;
-				}
-
-				std::memmove(&cdvd.mg_buffer[0], &cdvd.mg_buffer[ofs], copy_len);
-
-				cdvd.mg_maxsize = 0; // don't allow any write
-				cdvd.mg_size = 8 + 16 * cdvd.mg_buffer[4]; //new offset, i just moved the data
-				Console.WriteLn("[MG] BIT count=%d", cdvd.mg_buffer[4]);
-
-				cdvd.SCMDResultBuff[0] = (cdvd.mg_datatype == 1) ? 0 : 0x80; // 0 complete ; 1 busy ; 0x80 error
+				cdvd.SCMDResultBuff[0] = MgPrepareBitTableFromHeader() ? 0 : 0x80;
 				cdvd.SCMDResultBuff[1] = (cdvd.mg_size >> 0) & 0xFF;
 				cdvd.SCMDResultBuff[2] = (cdvd.mg_size >> 8) & 0xFF;
+				if (cdvd.SCMDResultBuff[0] != 0)
+					fail_pol_cal();
 				break;
 			}
+
 			case 0x92: // sceMgWriteDatainLength
 				SetSCMDResultSize(1); //in:2
 				cdvd.mg_size = 0;
-				cdvd.mg_datatype = 0; //data (encrypted)
-				cdvd.mg_maxsize = cdvd.SCMDParamBuff[0] | (((int)cdvd.SCMDParamBuff[1]) << 8);
-				cdvd.SCMDResultBuff[0] = 0; // 0 complete ; 1 busy ; 0x80 error
+				cdvd.mg_datatype = 0;
+				cdvd.mg_maxsize = cdvd.SCMDParamBuff[0] | (static_cast<int>(cdvd.SCMDParamBuff[1]) << 8);
+				s_mg_auth.stage = (s_mg_auth.stage >= MgAuthStage::BitPrepared) ? MgAuthStage::ContentExpected : MgAuthStage::Idle;
+				cdvd.SCMDResultBuff[0] = (s_mg_auth.stage == MgAuthStage::ContentExpected) ? 0 : 0x80;
 				break;
 
 			case 0x93: // sceMgWriteDataoutLength
 				SetSCMDResultSize(1); //in:2
-				if (((cdvd.SCMDParamBuff[0] | (static_cast<int>(cdvd.SCMDParamBuff[1]) << 8)) == cdvd.mg_size) && (cdvd.mg_datatype == 0))
+				if (((cdvd.SCMDParamBuff[0] | (static_cast<int>(cdvd.SCMDParamBuff[1]) << 8)) == cdvd.mg_size) &&
+					(cdvd.mg_datatype == 0) && MgValidateContentTransfer())
 				{
-					cdvd.mg_maxsize = 0; // don't allow any write
-					cdvd.SCMDResultBuff[0] = 0; // 0 complete ; 1 busy ; 0x80 error
+					cdvd.mg_maxsize = 0;
+					cdvd.SCMDResultBuff[0] = 0;
 				}
 				else
 				{
@@ -3044,27 +3166,33 @@ static void cdvdWrite16(u8 rt) // SCOMMAND
 
 			case 0x94: // sceMgReadKbit - read first half of BIT key
 				SetSCMDResultSize(1 + 8); //in:0
-				cdvd.SCMDResultBuff[0] = 0;
-				memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kbit, 8);
+				cdvd.SCMDResultBuff[0] = s_mg_auth.keys_published ? 0 : 0x80;
+				std::memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kbit, 8);
 				break;
 
 			case 0x95: // sceMgReadKbit2 - read second half of BIT key
 				SetSCMDResultSize(1 + 8); //in:0
-				cdvd.SCMDResultBuff[0] = 0;
-				memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kbit+8, 8);
+				cdvd.SCMDResultBuff[0] = s_mg_auth.keys_published ? 0 : 0x80;
+				std::memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kbit + 8, 8);
 				break;
 
 			case 0x96: // sceMgReadKcon - read first half of content key
 				SetSCMDResultSize(1 + 8); //in:0
-				cdvd.SCMDResultBuff[0] = 0;
-				memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kcon, 8);
+				cdvd.SCMDResultBuff[0] = s_mg_auth.keys_published ? 0 : 0x80;
+				std::memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kcon, 8);
 				break;
 
 			case 0x97: // sceMgReadKcon2 - read second half of content key
 				SetSCMDResultSize(1 + 8); //in:0
-				cdvd.SCMDResultBuff[0] = 0;
-				memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kcon + 8, 8);
+				cdvd.SCMDResultBuff[0] = s_mg_auth.keys_published ? 0 : 0x80;
+				std::memcpy(&cdvd.SCMDResultBuff[1], cdvd.mg_kcon + 8, 8);
 				break;
+			case 0x98: // sceMgReadIcvPs2
+				SetSCMDResultSize(1 + 8); //in:0
+				cdvd.SCMDResultBuff[0] = (s_mg_auth.stage >= MgAuthStage::CardVerified) ? 0 : 0x80;
+				std::memcpy(&cdvd.SCMDResultBuff[1], s_mg_auth.icvps2_key.data(), 8);
+				break;
+
 
 			default:
 				SetSCMDResultSize(1); //in:0
