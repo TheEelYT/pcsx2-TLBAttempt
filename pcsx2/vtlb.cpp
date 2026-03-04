@@ -94,7 +94,7 @@ static bool vtlb_ShouldLogCompact()
 
 static bool vtlb_ShouldLogVerbose()
 {
-	return TLB_LOG;
+	return EmuConfig.Trace.Enabled && TraceLogging.EE.TLBMMU.Enabled;
 }
 
 static const char* vtlb_AccessModeToString(u32 mode)
