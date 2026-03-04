@@ -202,6 +202,46 @@ void recMTC0()
 	{
 		switch (_Rd_)
 		{
+			case 0:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Index, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 1:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Random, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 2:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0EntryLo0, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 3:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0EntryLo1, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 4:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Context, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 5:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0PageMask, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 6:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Wired, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
+			case 10:
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0EntryHi, g_cpuConstRegs[_Rt_].UL[0]);
+				break;
+
 			case 12:
 				iFlushCall(FLUSH_INTERPRETER);
 				xMOV(eax, ptr32[&cpuRegs.cycle]);
@@ -268,6 +308,54 @@ void recMTC0()
 	{
 		switch (_Rd_)
 		{
+			case 0:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Index);
+				break;
+
+			case 1:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Random);
+				break;
+
+			case 2:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0EntryLo0);
+				break;
+
+			case 3:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0EntryLo1);
+				break;
+
+			case 4:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Context);
+				break;
+
+			case 5:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0PageMask);
+				break;
+
+			case 6:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0Wired);
+				break;
+
+			case 10:
+				_eeMoveGPRtoR(arg1reg, _Rt_);
+				iFlushCall(FLUSH_INTERPRETER);
+				xFastCall((void*)WriteCP0EntryHi);
+				break;
+
 			case 12:
 				_eeMoveGPRtoR(arg1reg, _Rt_);
 				iFlushCall(FLUSH_INTERPRETER);
