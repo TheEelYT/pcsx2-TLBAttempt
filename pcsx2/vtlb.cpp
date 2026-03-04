@@ -172,6 +172,7 @@ static void vtlb_LogFastmemCompact(bool is_create, u32 vaddr, u32 mainmem_offset
 	if (state.is_create != is_create || state.prot != prot || !contiguous)
 	{
 		vtlb_FlushCompactLogState();
+		vtlb_FlushFastmemCompactLog();
 		state.active = true;
 		state.is_create = is_create;
 		state.start_vaddr = vaddr;
@@ -373,6 +374,7 @@ static void vtlb_LogCpuStateSnapshot(std::string_view event, u32 addr, u32 mode)
 	}
 
 	vtlb_FlushCompactLogState();
+	vtlb_FlushFastmemCompactLog();
 	const std::string compact = fmt::format("pc={:08X} bd={} access={} vaddr={:08X}",
 		cpuRegs.pc, cpuRegs.branch ? 1 : 0, vtlb_AccessModeToString(mode), addr);
 	vtlb_LogEventCompact(event, compact);
