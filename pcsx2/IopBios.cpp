@@ -19,11 +19,13 @@
 #include "common/Path.h"
 
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <sys/stat.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <unordered_set>
 #include <vector>
 
@@ -527,22 +529,106 @@ namespace R3000A
 		if (!dev9.ata)
 			return false;
 
-		constexpr size_t kMaxScanBytes = 64 * 1024 * 1024;
-		constexpr size_t kChunkSize = 1 * 1024 * 1024;
-		std::vector<u8> blob;
-		blob.resize(kMaxScanBytes);
-		size_t filled = 0;
-		for (; filled < kMaxScanBytes; filled += kChunkSize)
+		constexpr size_t kSectorSize = 512;
+		constexpr size_t kApaHeaderSize = 1024;
+		constexpr size_t kApaMaxHeaders = 64;
+		constexpr size_t kPartitionScanBytes = 8 * 1024 * 1024;
+		constexpr size_t kTotalScanBudget = 24 * 1024 * 1024;
+		constexpr u32 kApaMagic = 0x00415041; // "APA\0"
+
+		auto read_bytes = [](const u64 offset, void* dst, const size_t size) {
+			return dev9.ata && dev9.ata->ReadBytesForXFrom(offset, dst, size);
+		};
+
+		auto read_u32 = [](const std::array<u8, kApaHeaderSize>& hdr, const size_t off) {
+			return static_cast<u32>(hdr[off] | (hdr[off + 1] << 8) | (hdr[off + 2] << 16) | (hdr[off + 3] << 24));
+		};
+
+		struct ApaCandidate
 		{
-			const size_t to_read = std::min(kChunkSize, kMaxScanBytes - filled);
-			if (!dev9.ata->ReadBytesForXFrom(static_cast<u64>(filled), blob.data() + filled, to_read))
-				break;
-		}
-		blob.resize(filled);
-		if (blob.empty())
+			u64 offset = 0;
+			u64 length_bytes = 0;
+			std::string name;
+		};
+
+		const auto partition_looks_pfs_related = [](const std::string& name) {
+			return starts_with_case_insensitive(name, "__") || starts_with_case_insensitive(name, "pfs") ||
+				name.find("system") != std::string::npos;
+		};
+
+		std::array<u8, kApaHeaderSize> header{};
+		if (!read_bytes(0, header.data(), header.size()))
 			return false;
 
-		return try_extract_elf_payload(blob, file_name, out);
+		u32 next_sector = read_u32(header, 0x08);
+		size_t scanned_bytes = 0;
+		std::vector<ApaCandidate> candidates;
+		candidates.reserve(8);
+
+		for (size_t i = 0; i < kApaMaxHeaders && next_sector != 0; i++)
+		{
+			const u64 offset = static_cast<u64>(next_sector) * kSectorSize;
+			if (!read_bytes(offset, header.data(), header.size()))
+				break;
+
+			if (read_u32(header, 0x04) != kApaMagic)
+				break;
+
+			const u32 start_sector = read_u32(header, 0x70);
+			const u32 length_sector = read_u32(header, 0x74);
+			const char* name_ptr = reinterpret_cast<const char*>(&header[0x10]);
+			std::string part_name(name_ptr, strnlen(name_ptr, 32));
+			std::transform(part_name.begin(), part_name.end(), part_name.begin(), [](unsigned char c) {
+				return static_cast<char>(std::tolower(c));
+			});
+
+			if (start_sector != 0 && length_sector != 0 && partition_looks_pfs_related(part_name))
+			{
+				ApaCandidate c;
+				c.offset = static_cast<u64>(start_sector) * kSectorSize;
+				c.length_bytes = static_cast<u64>(length_sector) * kSectorSize;
+				c.name = std::move(part_name);
+				candidates.emplace_back(std::move(c));
+			}
+
+			next_sector = read_u32(header, 0x08);
+		}
+
+		for (const ApaCandidate& part : candidates)
+		{
+			if (scanned_bytes >= kTotalScanBudget)
+				break;
+
+			const size_t window = static_cast<size_t>(std::min<u64>(part.length_bytes, kPartitionScanBytes));
+			const size_t allowed = std::min(window, kTotalScanBudget - scanned_bytes);
+			if (allowed == 0)
+				break;
+
+			std::vector<u8> blob(allowed);
+			if (!read_bytes(part.offset, blob.data(), blob.size()))
+				continue;
+
+			scanned_bytes += blob.size();
+
+			// Look for a PFS marker in the scanned window before trying extraction.
+			size_t pfs_pos = 0;
+			if (!find_case_insensitive_in_blob(blob, "PFS", &pfs_pos))
+				continue;
+
+			if (try_extract_elf_payload(blob, file_name, out))
+				return true;
+		}
+
+		return false;
+	}
+
+	static bool xfrom_allow_host_fallback_for_biexec()
+	{
+		const char* env = std::getenv("PCSX2_XFROM_BIEXEC_HOST_FALLBACK");
+		if (!env)
+			return false;
+
+		return iequals_ascii(env, "1") || iequals_ascii(env, "true") || iequals_ascii(env, "yes") || iequals_ascii(env, "on");
 	}
 
 	static bool try_read_xfrom_from_flash(const std::string_view file_name, std::vector<u8>* out)
@@ -614,6 +700,10 @@ namespace R3000A
 		{
 			(void)mode;
 			*file = nullptr;
+			const auto resolver_start = std::chrono::steady_clock::now();
+			auto resolver_elapsed_ms = [&resolver_start]() {
+				return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - resolver_start).count();
+			};
 
 			const std::string normalized = normalize_xfrom_path(full_path);
 			const bool is_biexec_elf = is_biexec_elf_path(full_path);
@@ -630,20 +720,37 @@ namespace R3000A
 			{
 				const std::string file_name(Path::GetFileName(normalized));
 				std::vector<u8> image;
+				Console.WriteLn("XFROM: BIEXEC resolver start source=hdd file='%s'", file_name.c_str());
 				if (try_read_xfrom_from_hdd(file_name, &image))
 				{
-					Console.WriteLn("XFROM: block-image-backed resolution source='hdd image' file='%s'", file_name.c_str());
+					Console.WriteLn("XFROM: BIEXEC resolver end source=hdd status=success bytes=%zu elapsed_ms=%lld", image.size(), resolver_elapsed_ms());
 					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::HddBacked);
 					*file = new XFromBlobFile(std::move(image), full_path, XFromResolvedSource::HddBacked);
 					return 0;
 				}
+				Console.WriteLn("XFROM: BIEXEC resolver end source=hdd status=miss reason='not found in APA/PFS scan budget' elapsed_ms=%lld", resolver_elapsed_ms());
+
+				Console.WriteLn("XFROM: BIEXEC resolver start source=flash file='%s'", file_name.c_str());
 				if (try_read_xfrom_from_flash(file_name, &image))
 				{
-					Console.WriteLn("XFROM: block-image-backed resolution source='flash image' file='%s'", file_name.c_str());
+					Console.WriteLn("XFROM: BIEXEC resolver end source=flash status=success bytes=%zu elapsed_ms=%lld", image.size(), resolver_elapsed_ms());
 					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::FlashBacked);
 					*file = new XFromBlobFile(std::move(image), full_path, XFromResolvedSource::FlashBacked);
 					return 0;
 				}
+				Console.WriteLn("XFROM: BIEXEC resolver end source=flash status=miss reason='file tag or elf payload not found' elapsed_ms=%lld", resolver_elapsed_ms());
+
+				if (!xfrom_allow_host_fallback_for_biexec())
+				{
+					const int internal_err = -IOP_ENOENT;
+					const int exported_err = xfrom_export_error(internal_err, true);
+					Console.Warning("XFROM: BIEXEC resolver end source=none status=failure reason='host fallback disabled (set PCSX2_XFROM_BIEXEC_HOST_FALLBACK=1 to enable)' elapsed_ms=%lld exported=%d (%s)",
+						resolver_elapsed_ms(), exported_err, xfrom_error_reason(exported_err));
+					xfrom_log_biexec_error_once(XFromOperation::Open, full_path, internal_err, exported_err);
+					return exported_err;
+				}
+
+				Console.Warning("XFROM: BIEXEC host fallback enabled via PCSX2_XFROM_BIEXEC_HOST_FALLBACK");
 			}
 
 			const std::string rel = normalized.substr(1);
@@ -718,6 +825,8 @@ namespace R3000A
 
 				Console.WriteLn("XFROM: resolved='%s' mount/source='%s'", candidate.c_str(), source);
 				if (is_biexec_elf)
+					Console.WriteLn("XFROM: BIEXEC resolver end source=host status=success bytes=unknown elapsed_ms=%lld", resolver_elapsed_ms());
+				if (is_biexec_elf)
 					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::HostFallback);
 				*file = new XFromFile(fd, candidate, source);
 				return 0;
@@ -727,6 +836,8 @@ namespace R3000A
 			const int exported_err = xfrom_export_error(internal_err, is_biexec_elf);
 			Console.Warning("XFROM: failed to resolve '%s' (normalized '%s'). internal=%d (%s) exported=%d (%s)",
 				full_path.c_str(), normalized.c_str(), internal_err, xfrom_error_reason(internal_err), exported_err, xfrom_error_reason(exported_err));
+			if (is_biexec_elf)
+				Console.Warning("XFROM: BIEXEC resolver end source=host status=failure reason='no host candidate matched' elapsed_ms=%lld", resolver_elapsed_ms());
 			xfrom_log_biexec_error_once(XFromOperation::Open, full_path, internal_err, exported_err);
 			return exported_err;
 		}
