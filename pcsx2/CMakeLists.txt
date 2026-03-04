@@ -116,6 +116,8 @@ set(pcsx2Sources
 	SIO/Memcard/MemoryCardFolder.cpp
 	SIO/Memcard/MemoryCardAuthProvider.cpp
 	SIO/Memcard/MemoryCardProtocol.cpp
+	Crypto/MagicGateCrypto.cpp
+	../3rdparty/crypto/des/des.cpp
 	SourceLog.cpp
 	SPR.cpp
 	StateWrapper.cpp
@@ -193,6 +195,8 @@ set(pcsx2Headers
 	SIO/Memcard/MemoryCardFolder.h
 	SIO/Memcard/MemoryCardAuthProvider.h
 	SIO/Memcard/MemoryCardProtocol.h
+	Crypto/MagicGateCrypto.h
+	../3rdparty/crypto/des/des.h
 	SPR.h
 	SupportURLs.h
 	StateWrapper.h

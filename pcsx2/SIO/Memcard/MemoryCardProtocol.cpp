@@ -6,12 +6,14 @@
 #include "SIO/Sio.h"
 #include "SIO/Sio2.h"
 #include "SIO/Sio0.h"
+#include "Crypto/MagicGateCrypto.h"
 
 #include "common/Assertions.h"
 #include "common/Console.h"
 #include "common/Path.h"
 #include "ps2/BiosTools.h"
 
+#include <algorithm>
 #include <cstring>
 
 #define MC_LOG_ENABLE 0
@@ -512,6 +514,7 @@ void MemoryCardProtocol::AuthCrypt()
 			break;
 		case 0x41:
 		case 0x51:
+		{
 			authCryptReceive = true;
 			authCryptOffset = 0;
 			while (!g_Sio2FifoIn.empty() && authCryptOffset < authCryptBuffer.size())
@@ -519,8 +522,26 @@ void MemoryCardProtocol::AuthCrypt()
 				authCryptBuffer[authCryptOffset++] = g_Sio2FifoIn.front();
 				g_Sio2FifoIn.pop_front();
 			}
+
+			// Adapted crypto backend for PR #4274 behavior: shared internal DES/2DES API.
+			if (authMaterialLoaded && authCryptOffset >= 8)
+			{
+				const MagicGateMaterial& material = m_auth_provider.GetMaterial(m_current_keyset);
+				MagicGateCrypto::Block8 input = {};
+				MagicGateCrypto::Block8 output = {};
+				std::copy_n(authCryptBuffer.begin(), 8, input.begin());
+
+				if (modeByte == 0x41)
+					MagicGateCrypto::TwoDesDecrypt(material.key, input, &output);
+				else
+					MagicGateCrypto::TwoDesEncrypt(material.key, input, &output);
+
+				std::copy_n(output.begin(), 8, authCryptBuffer.begin());
+			}
+
 			The2bTerminator(5);
 			break;
+		}
 		case 0x43:
 		case 0x53:
 			authCryptReceive = false;
