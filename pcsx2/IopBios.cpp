@@ -379,6 +379,7 @@ namespace R3000A
 
 	static bool s_xfrom_readable_biexec = false;
 	static std::unordered_set<std::string> s_xfrom_logged_biexec_probes;
+	static std::unordered_set<std::string> s_xfrom_logged_invalid_candidates;
 
 	static void xfrom_log_biexec_probe_once(const char* source, const std::string& candidate, const bool exists)
 	{
@@ -387,6 +388,16 @@ namespace R3000A
 
 		Console.WriteLn("XFROM: BIEXEC probe %s source='%s' candidate='%s'",
 			exists ? "exists" : "missing", source, candidate.c_str());
+	}
+
+	static void xfrom_log_invalid_candidate_once(const char* source, const std::string& root, const std::string& rel)
+	{
+		const std::string key = fmt::format("{}:{}:{}", source, root, rel);
+		if (!s_xfrom_logged_invalid_candidates.emplace(key).second)
+			return;
+
+		Console.Warning("XFROM: invalid candidate construction source='%s' root='%s' rel='%s'",
+			source, root.c_str(), rel.c_str());
 	}
 
 
@@ -621,12 +632,14 @@ namespace R3000A
 				std::vector<u8> image;
 				if (try_read_xfrom_from_hdd(file_name, &image))
 				{
+					Console.WriteLn("XFROM: block-image-backed resolution source='hdd image' file='%s'", file_name.c_str());
 					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::HddBacked);
 					*file = new XFromBlobFile(std::move(image), full_path, XFromResolvedSource::HddBacked);
 					return 0;
 				}
 				if (try_read_xfrom_from_flash(file_name, &image))
 				{
+					Console.WriteLn("XFROM: block-image-backed resolution source='flash image' file='%s'", file_name.c_str());
 					xfrom_log_biexec_source_once(full_path, XFromResolvedSource::FlashBacked);
 					*file = new XFromBlobFile(std::move(image), full_path, XFromResolvedSource::FlashBacked);
 					return 0;
@@ -652,6 +665,12 @@ namespace R3000A
 				if (root.empty())
 					return;
 
+				if (!Path::IsDirectory(root) && !Path::GetExtension(root).empty())
+				{
+					xfrom_log_invalid_candidate_once(source, root, rel);
+					return;
+				}
+
 				add_candidate(source, Path::Combine(root, rel));
 			};
 
@@ -673,7 +692,6 @@ namespace R3000A
 				const std::string hdd_dir(Path::GetDirectory(hdd_path));
 				const std::string hdd_title(Path::GetFileTitle(hdd_path));
 
-				add_candidate_root("DEV9 HDD path", hdd_path);
 				add_candidate_root("DEV9 HDD parent", hdd_dir);
 				add_candidate_root("DEV9 HDD parent/xfrom", Path::Combine(hdd_dir, "xfrom"));
 				add_candidate_root("DEV9 HDD parent/BIEXEC-SYSTEM", Path::Combine(hdd_dir, "BIEXEC-SYSTEM"));
