@@ -1119,6 +1119,14 @@ target_sources(PCSX2 PRIVATE
 	${pcsx2ps2Headers}
 )
 
+# Keep MagicGate support units explicitly listed here as well.
+# They are also part of pcsx2Sources, but this makes the linkage intent unambiguous
+# for generators/tooling where stale project state can miss newly added translation units.
+target_sources(PCSX2 PRIVATE
+	Crypto/MagicGateCrypto.cpp
+	SIO/Memcard/MemoryCardAuthProvider.cpp
+)
+
 # platform sources
 if(LINUX)
 	target_sources(PCSX2 PRIVATE
