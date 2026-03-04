@@ -33,6 +33,43 @@ static bool flash_save_failure_logged = false;
 static u32 flash_read_sequence = 0;
 static std::string flash_save_path;
 
+struct FlashImageAnalysis
+{
+	u64 checksum = 0;
+	u32 ff_count = 0;
+	u32 byte_histogram[16] = {};
+};
+
+static FlashImageAnalysis AnalyzeFlashImage(const u8* image, size_t size)
+{
+	FlashImageAnalysis analysis;
+	analysis.checksum = 1469598103934665603ULL; // FNV-1a offset basis
+
+	for (size_t i = 0; i < size; i++)
+	{
+		const u8 value = image[i];
+		analysis.checksum ^= value;
+		analysis.checksum *= 1099511628211ULL; // FNV-1a prime
+		analysis.ff_count += (value == 0xFF) ? 1 : 0;
+		analysis.byte_histogram[(value >> 4) & 0x0F]++;
+	}
+
+	return analysis;
+}
+
+static void LogFlashImageAnalysis(const char* context, const u8* image, size_t size)
+{
+	const FlashImageAnalysis analysis = AnalyzeFlashImage(image, size);
+	const u32 non_ff_count = static_cast<u32>(size) - analysis.ff_count;
+	DevCon.WriteLn(
+		"DEV9: flash image analysis (%s): checksum=0x%016llX non_erased=%u erased=%u differs_from_erased_default=%s histogram_hi_nibbles=[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]",
+		context, analysis.checksum, non_ff_count, analysis.ff_count, non_ff_count ? "yes" : "no",
+		analysis.byte_histogram[0], analysis.byte_histogram[1], analysis.byte_histogram[2], analysis.byte_histogram[3],
+		analysis.byte_histogram[4], analysis.byte_histogram[5], analysis.byte_histogram[6], analysis.byte_histogram[7],
+		analysis.byte_histogram[8], analysis.byte_histogram[9], analysis.byte_histogram[10], analysis.byte_histogram[11],
+		analysis.byte_histogram[12], analysis.byte_histogram[13], analysis.byte_histogram[14], analysis.byte_histogram[15]);
+}
+
 static std::string ResolveAbsolutePath(const std::string& path, const std::string& relative_to)
 {
 	if (Path::IsAbsolute(path))
@@ -126,16 +163,25 @@ static std::string GetFlashSavePath()
 
 void FLASHSaveIfDirty(const char* reason)
 {
-	if (!flash_dirty)
-		return;
-
 	if (flash_save_path.empty())
 		flash_save_path = GetFlashSavePath();
+
+	if (!flash_dirty)
+	{
+		DevCon.WriteLn("DEV9: flash save trigger (%s): skipped (clean), path='%s', bytes_written=0, result=clean-noop.",
+			reason, flash_save_path.c_str());
+		return;
+	}
+
+	DevCon.WriteLn("DEV9: flash save trigger (%s): starting, path='%s', bytes_to_write=%u.",
+		reason, flash_save_path.c_str(), static_cast<unsigned>(CARD_SIZE_ECC));
 
 	const std::string flash_directory(Path::GetDirectory(flash_save_path));
 	if (!flash_directory.empty() && !FileSystem::DirectoryExists(flash_directory.c_str()) &&
 		!FileSystem::CreateDirectoryPath(flash_directory.c_str(), false))
 	{
+		DevCon.Warning("DEV9: flash save trigger (%s): failed, path='%s', bytes_written=0, result=mkdir-failed ('%s').",
+			reason, flash_save_path.c_str(), flash_directory.c_str());
 		if (!flash_save_failure_logged)
 		{
 			DevCon.Warning("DEV9: failed to save flash image on %s to '%s': unable to create directory '%s'.",
@@ -148,6 +194,8 @@ void FLASHSaveIfDirty(const char* reason)
 	FILE* fd = FileSystem::OpenCFile(flash_save_path.c_str(), "wb");
 	if (fd == nullptr)
 	{
+		DevCon.Warning("DEV9: flash save trigger (%s): failed, path='%s', bytes_written=0, result=open-failed.",
+			reason, flash_save_path.c_str());
 		if (!flash_save_failure_logged)
 		{
 			DevCon.Warning("DEV9: failed to save flash image on %s to '%s': could not open file for write.",
@@ -161,6 +209,8 @@ void FLASHSaveIfDirty(const char* reason)
 	fclose(fd);
 	if (written != CARD_SIZE_ECC)
 	{
+		DevCon.Warning("DEV9: flash save trigger (%s): failed, path='%s', bytes_written=%zu, result=short-write.",
+			reason, flash_save_path.c_str(), written);
 		if (!flash_save_failure_logged)
 		{
 			DevCon.Warning("DEV9: failed to save flash image on %s to '%s': wrote %zu of %u bytes.",
@@ -172,6 +222,8 @@ void FLASHSaveIfDirty(const char* reason)
 
 	flash_dirty = false;
 	flash_file_loaded = true;
+	DevCon.WriteLn("DEV9: flash save trigger (%s): completed, path='%s', bytes_written=%zu, result=success.",
+		reason, flash_save_path.c_str(), written);
 	if (!flash_save_success_logged)
 	{
 		DevCon.WriteLn("DEV9: saved flash image (%u bytes) to '%s' on %s.",
@@ -275,6 +327,7 @@ void FLASHinit()
 
 		flash_file_loaded = true;
 		DevCon.WriteLn("DEV9: loaded flash image from '%s'.", flash_candidate.c_str());
+		LogFlashImageAnalysis("load", file, CARD_SIZE_ECC);
 		break;
 	}
 
@@ -301,6 +354,7 @@ void FLASHinit()
 						flash_file_loaded = true;
 						flash_save_path = auto_create_path;
 						DevCon.WriteLn("DEV9: reopened auto-created flash image from '%s'.", auto_create_path.c_str());
+						LogFlashImageAnalysis("auto-created-load", file, CARD_SIZE_ECC);
 					}
 					else
 					{
@@ -327,6 +381,7 @@ void FLASHinit()
 				"DEV9: using erased in-memory flash fallback (0xFF). Ensure '%s' is writable or configure DEV9/Hdd/FlashFile to a writable path.",
 				auto_create_path.c_str());
 			memset(file, 0xFF, CARD_SIZE_ECC);
+			LogFlashImageAnalysis("erased-fallback", file, CARD_SIZE_ECC);
 		}
 	}
 }
@@ -502,6 +557,7 @@ void FLASHwrite32(u32 addr, u32 value, int size)
 					addrbyte = 0;
 					break;
 				case SM_CMD_RESET:
+					FLASHSaveIfDirty("flash-reset");
 					FLASHinit();
 					break;
 				case SM_CMD_WRITEDATA:
@@ -520,6 +576,11 @@ void FLASHwrite32(u32 addr, u32 value, int size)
 					ctrl &= ~FLASH_PP_READY;
 					calculateECC(data);
 					memcpy(file + (address / PAGE_SIZE) * PAGE_SIZE_ECC, data, PAGE_SIZE_ECC);
+					if (!flash_dirty)
+					{
+						DevCon.WriteLn("DEV9: flash marked dirty (first write after clean state): cmd=%s address=0x%08lX page=%u.",
+							getCmdName(value), address, address / PAGE_SIZE);
+					}
 					flash_dirty = true;
 					ctrl |= FLASH_PP_READY;
 					FLASHSaveIfDirty("write-complete");
