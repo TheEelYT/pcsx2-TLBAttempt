@@ -628,7 +628,7 @@ namespace R3000A
 
 			if (is_biexec_elf)
 			{
-				const std::string file_name = Path::GetFileName(normalized);
+				const std::string file_name(Path::GetFileName(normalized));
 				std::vector<u8> image;
 				if (try_read_xfrom_from_hdd(file_name, &image))
 				{
