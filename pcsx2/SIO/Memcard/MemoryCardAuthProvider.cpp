@@ -4,6 +4,7 @@
 #include "SIO/Memcard/MemoryCardAuthProvider.h"
 
 #include "Host.h"
+#include "Config.h"
 #include "CDVD/CDVD.h"
 #include "common/Console.h"
 #include "common/FileSystem.h"
@@ -118,6 +119,45 @@ bool MemoryCardAuthProvider::LoadBlob(const std::string& path, bool from_overrid
 	return true;
 }
 
+
+bool MemoryCardAuthProvider::LoadLegacySplitBlobs(const std::string& directory, bool from_override)
+{
+	const std::string cks_path = Path::Combine(directory, "cks.bin");
+	const auto cks_blob = FileSystem::ReadBinaryFile(cks_path.c_str());
+	if (!cks_blob)
+	{
+		ERROR_LOG("MagicGate: failed to read {} legacy split blob '{}'", from_override ? "override" : "fallback", cks_path);
+		return false;
+	}
+
+	// Legacy PR #4274 layout for memory-card material is carried by cks.bin.
+	// Common layout seen in the wild is 96 bytes: 4x16-byte keys + 4x8-byte IV blocks.
+	if (cks_blob->size() < 96)
+	{
+		ERROR_LOG("MagicGate: legacy cks.bin '{}' has invalid size {} (expected at least 96 bytes)", cks_path, cks_blob->size());
+		return false;
+	}
+
+	for (size_t i = 0; i < m_material.size(); i++)
+	{
+		MagicGateMaterial& material = m_material[i];
+		std::memcpy(material.key.data(), cks_blob->data() + (i * 16), 16);
+
+		if (cks_blob->size() >= 100)
+		{
+			std::memcpy(material.iv.data(), cks_blob->data() + 64 + (i * 9), 9);
+		}
+		else
+		{
+			std::memcpy(material.iv.data(), cks_blob->data() + 64 + (i * 8), 8);
+			material.iv[8] = 0x00;
+		}
+
+		material.valid = true;
+	}
+
+	return true;
+}
 void MemoryCardAuthProvider::Refresh()
 {
 	for (MagicGateMaterial& material : m_material)
@@ -133,15 +173,37 @@ void MemoryCardAuthProvider::Refresh()
 			return;
 		}
 
+		if (FileSystem::DirectoryExists(override_path->c_str()) && LoadLegacySplitBlobs(*override_path, true))
+		{
+			INFO_LOG("MagicGate: using override legacy split key files from '{}'", *override_path);
+			return;
+		}
+
 		WARNING_LOG("MagicGate: override blob failed, falling back to BIOS-coupled discovery.");
 	}
 
 	const std::string bios_blob_path = GetBiosCoupledBlobPath();
-	if (!LoadBlob(bios_blob_path, false))
+	if (LoadBlob(bios_blob_path, false))
+		return;
+
+	std::vector<std::string> legacy_dirs;
+	legacy_dirs.emplace_back(EmuFolders::MagicGate);
+	legacy_dirs.emplace_back(Path::Combine(std::string(Path::GetDirectory(BiosPath)), "magicgate"));
+
+	for (const std::string& dir : legacy_dirs)
 	{
-		WARNING_LOG("MagicGate: no key material available for BIOS '{}', auth will run in degraded mode.",
-			Path::GetFileName(BiosPath));
+		if (!FileSystem::DirectoryExists(dir.c_str()))
+			continue;
+
+		if (LoadLegacySplitBlobs(dir, false))
+		{
+			INFO_LOG("MagicGate: using legacy split key files from '{}'", dir);
+			return;
+		}
 	}
+
+	WARNING_LOG("MagicGate: no key material available for BIOS '{}', auth will run in degraded mode.",
+		Path::GetFileName(BiosPath));
 }
 
 MagicGateKeyset MemoryCardAuthProvider::GetDefaultKeyset() const
