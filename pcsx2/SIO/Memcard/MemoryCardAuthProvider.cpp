@@ -154,6 +154,7 @@ bool MemoryCardAuthProvider::LoadLegacySplitBlobs(const std::string& directory, 
 
 	return true;
 }
+
 void MemoryCardAuthProvider::Refresh()
 {
 	for (MagicGateMaterial& material : m_material)
