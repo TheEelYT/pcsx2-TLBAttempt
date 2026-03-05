@@ -1425,24 +1425,35 @@ bool vtlb_BackpatchLoadStore(uptr code_address, uptr fault_address)
 	uptr fastmem_start = (uptr)vtlbdata.fastmem_base;
 	uptr fastmem_end = fastmem_start + 0xFFFFFFFFu;
 	if (fault_address < fastmem_start || fault_address > fastmem_end)
+	{
+		FASTMEM_LOG("Backpatch skip: fault address %p outside fastmem range", (void*)fault_address);
 		return false;
+	}
 
 	auto iter = s_fastmem_backpatch_info.find(code_address);
 	if (iter == s_fastmem_backpatch_info.end())
+	{
+		FASTMEM_LOG("Backpatch skip: code address %p not registered", (void*)code_address);
 		return false;
+	}
 
 	const LoadstoreBackpatchInfo& info = iter->second;
 	const u32 guest_addr = static_cast<u32>(fault_address - fastmem_start);
 	vtlb_DynBackpatchLoadStore(code_address, info.code_size, info.guest_pc, guest_addr,
 		info.gpr_bitmask, info.fpr_bitmask, info.address_register, info.data_register,
 		info.size_in_bits, info.is_signed, info.is_load, info.is_fpr);
+	FASTMEM_LOG("Backpatch apply: code=%p guest_pc=%08X guest_addr=%08X size=%u load=%u fpr=%u",
+		(void*)code_address, info.guest_pc, guest_addr, info.size_in_bits, info.is_load ? 1u : 0u, info.is_fpr ? 1u : 0u);
 
 	// queue block for recompilation later
+	FASTMEM_LOG("Backpatch invalidate: Cpu->Clear(%08X, 1)", info.guest_pc);
 	Cpu->Clear(info.guest_pc, 1);
 
 	// and store the pc in the faulting list, so that we don't emit another fastmem loadstore
+	FASTMEM_LOG("Backpatch faulting-pc insert: %08X", info.guest_pc);
 	s_fastmem_faulting_pcs.insert(info.guest_pc);
 	s_fastmem_backpatch_info.erase(iter);
+	FASTMEM_LOG("Backpatch complete: code entry removed for %p", (void*)code_address);
 	return true;
 }
 
