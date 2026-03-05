@@ -317,6 +317,17 @@ static void LogTLBEntryEvent(const char* op, s32 selected, const tlbs& t)
 	LogTLBEvent(op, selected, t.PageMask.UL, t.EntryHi.UL, t.EntryLo0.UL, t.EntryLo1.UL);
 }
 
+static void InvalidateTLBCodeRange(const char* reason, u32 vaddr, u32 size)
+{
+	TLB_LOG("TLB_INV cyc=%u pc=%08X reason=%s vaddr=%08X size=%X", cpuRegs.cycle, cpuRegs.pc, reason, vaddr, size);
+	Cpu->Clear(vaddr, size);
+}
+
+static void TLBChangedBarrier(const char* reason, const tlbs& t, int i)
+{
+	TLB_LOG("TLB_BARRIER cyc=%u pc=%08X reason=%s idx=%d vpn2=%08X mask=%08X", cpuRegs.cycle, cpuRegs.pc, reason, i, t.VPN2(), t.PageMask.UL);
+}
+
 void MapTLB(const tlbs& t, int i)
 {
 	u32 mask, addr;
@@ -334,6 +345,7 @@ void MapTLB(const tlbs& t, int i)
 			Console.Warning("COP0: Mapping Scratchpad to non-default address 0x%08X", t.VPN2());
 
 		vtlb_VMapBuffer(t.VPN2(), eeMem->Scratch, Ps2MemSize::Scratch);
+		InvalidateTLBCodeRange("MAP_SPR", t.VPN2(), Ps2MemSize::Scratch);
 	}
 	else
 	{
@@ -348,7 +360,7 @@ void MapTLB(const tlbs& t, int i)
 				if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 				{ //match
 					memSetPageAddr(addr << 12, t.PFN0() + ((addr - saddr) << 12));
-					Cpu->Clear(addr << 12, 0x400);
+					InvalidateTLBCodeRange("MAP_LO0", addr << 12, 0x400);
 				}
 			}
 		}
@@ -364,11 +376,13 @@ void MapTLB(const tlbs& t, int i)
 				if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 				{ //match
 					memSetPageAddr(addr << 12, t.PFN1() + ((addr - saddr) << 12));
-					Cpu->Clear(addr << 12, 0x400);
+					InvalidateTLBCodeRange("MAP_LO1", addr << 12, 0x400);
 				}
 			}
 		}
 	}
+
+	TLBChangedBarrier("MAP", t, i);
 }
 
 __inline u32 ConvertPageMask(const u32 PageMask)
@@ -389,6 +403,8 @@ void UnmapTLB(const tlbs& t, int i)
 	if (t.isSPR())
 	{
 		vtlb_VMapUnmap(t.VPN2(), 0x4000);
+		InvalidateTLBCodeRange("UNMAP_SPR", t.VPN2(), Ps2MemSize::Scratch);
+		TLBChangedBarrier("UNMAP", t, i);
 		return;
 	}
 
@@ -403,7 +419,7 @@ void UnmapTLB(const tlbs& t, int i)
 			if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 			{ //match
 				memClearPageAddr(addr << 12);
-				Cpu->Clear(addr << 12, 0x400);
+				InvalidateTLBCodeRange("UNMAP_LO0", addr << 12, 0x400);
 			}
 		}
 	}
@@ -419,7 +435,7 @@ void UnmapTLB(const tlbs& t, int i)
 			if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 			{ //match
 				memClearPageAddr(addr << 12);
-				Cpu->Clear(addr << 12, 0x400);
+				InvalidateTLBCodeRange("UNMAP_LO1", addr << 12, 0x400);
 			}
 		}
 	}
@@ -440,6 +456,8 @@ void UnmapTLB(const tlbs& t, int i)
 			break;
 		}
 	}
+
+	TLBChangedBarrier("UNMAP", t, i);
 }
 
 void WriteTLB(int i)
@@ -478,6 +496,7 @@ void WriteTLB(int i)
 	}
 
 	MapTLB(tlb[i], i);
+	TLBChangedBarrier("WRITE", tlb[i], i);
 }
 
 namespace R5900 {
