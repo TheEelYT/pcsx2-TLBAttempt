@@ -122,39 +122,35 @@ bool MemoryCardAuthProvider::LoadBlob(const std::string& path, bool from_overrid
 
 bool MemoryCardAuthProvider::LoadLegacySplitBlobs(const std::string& directory, bool from_override)
 {
+	const std::string eks_path = Path::Combine(directory, "eks.bin");
 	const std::string cks_path = Path::Combine(directory, "cks.bin");
+	const std::string kek_path = Path::Combine(directory, "kek.bin");
+	const std::string civ_path = Path::Combine(directory, "civ.bin");
+
+	const auto eks_blob = FileSystem::ReadBinaryFile(eks_path.c_str());
 	const auto cks_blob = FileSystem::ReadBinaryFile(cks_path.c_str());
-	if (!cks_blob)
+	const auto kek_blob = FileSystem::ReadBinaryFile(kek_path.c_str());
+	const auto civ_blob = FileSystem::ReadBinaryFile(civ_path.c_str());
+
+	if (!eks_blob || !cks_blob || !kek_blob || !civ_blob)
 	{
-		ERROR_LOG("MagicGate: failed to read {} legacy split blob '{}'", from_override ? "override" : "fallback", cks_path);
+		ERROR_LOG("MagicGate: failed to read {} legacy split blobs in '{}' (expected eks.bin/cks.bin/kek.bin/civ.bin)",
+			from_override ? "override" : "fallback", directory);
 		return false;
 	}
 
-	// Legacy PR #4274 layout for memory-card material is carried by cks.bin.
-	// Common layout seen in the wild is 96 bytes: 4x16-byte keys + 4x8-byte IV blocks.
-	if (cks_blob->size() < 96)
+	if (eks_blob->size() < 16 || cks_blob->size() < 16 || kek_blob->size() < 16 || civ_blob->size() < 8)
 	{
-		ERROR_LOG("MagicGate: legacy cks.bin '{}' has invalid size {} (expected at least 96 bytes)", cks_path, cks_blob->size());
+		ERROR_LOG("MagicGate: legacy split blobs in '{}' have invalid sizes (eks={}, cks={}, kek={}, civ={})",
+			directory, eks_blob->size(), cks_blob->size(), kek_blob->size(), civ_blob->size());
 		return false;
 	}
 
-	for (size_t i = 0; i < m_material.size(); i++)
-	{
-		MagicGateMaterial& material = m_material[i];
-		std::memcpy(material.key.data(), cks_blob->data() + (i * 16), 16);
-
-		if (cks_blob->size() >= 100)
-		{
-			std::memcpy(material.iv.data(), cks_blob->data() + 64 + (i * 9), 9);
-		}
-		else
-		{
-			std::memcpy(material.iv.data(), cks_blob->data() + 64 + (i * 8), 8);
-			material.iv[8] = 0x00;
-		}
-
-		material.valid = true;
-	}
+	// Legacy PR #4274-style files are treated as retail material for memory-card auth.
+	MagicGateMaterial& retail = m_material[static_cast<size_t>(MagicGateKeyset::Retail)];
+	std::memcpy(retail.key.data(), kek_blob->data(), 16);
+	std::memcpy(retail.iv.data(), civ_blob->data(), 8);
+	retail.valid = true;
 
 	return true;
 }
