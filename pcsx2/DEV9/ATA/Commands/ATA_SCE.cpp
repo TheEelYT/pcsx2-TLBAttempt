@@ -6,7 +6,39 @@
 
 void ATA::HDD_SCE()
 {
-	DevCon.WriteLn("DEV9: HDD_SCE SONY-SPECIFIC SECURITY CONTROL COMMAND %x", regFeature);
+	const char* command_name = "UNKNOWN";
+	switch (regFeature)
+	{
+		case 0xF1:
+			command_name = "SECURITY_SET_PASSWORD";
+			break;
+		case 0xF2:
+			command_name = "SECURITY_UNLOCK";
+			break;
+		case 0xF3:
+			command_name = "SECURITY_ERASE_PREPARE";
+			break;
+		case 0xF4:
+			command_name = "SECURITY_ERASE_UNIT";
+			break;
+		case 0xF5:
+			command_name = "SECURITY_FREEZE_LOCK";
+			break;
+		case 0x20:
+			command_name = "SECURITY_READ_ID";
+			break;
+		case 0x30:
+			command_name = "SECURITY_WRITE_ID";
+			break;
+		case 0xEC:
+			command_name = "IDENTIFY_DRIVE";
+			break;
+	}
+
+	Console.WriteLn(
+		"DEV9: PSBBN security probe: SCE %s (feature=0x%02X) nsector=0x%02X sector=0x%02X "
+		"lcyl=0x%02X hcyl=0x%02X select=0x%02X status=0x%02X",
+		command_name, regFeature, regNsector, regSector, regLcyl, regHcyl, regSelect, regStatus);
 
 	switch (regFeature)
 	{
@@ -17,7 +49,7 @@ void ATA::HDD_SCE()
 		case 0xF5: // ATA_SCE_SECURITY_FREEZE_LOCK
 		case 0x20: // ATA_SCE_SECURITY_READ_ID
 		case 0x30: // ATA_SCE_SECURITY_WRITE_ID
-			Console.Error("DEV9: ATA: SCE command %x not implemented", regFeature);
+			Console.Error("DEV9: ATA: SCE command %s (0x%02X) not implemented", command_name, regFeature);
 			CmdNoDataAbort();
 			break;
 		case 0xEC:
@@ -38,6 +70,8 @@ void ATA::HDD_SCE()
 // PS2 ID Dumper can be used as test case
 void ATA::SCE_IDENTIFY_DRIVE()
 {
+	Console.WriteLn("DEV9: PSBBN security probe: returning current 512-byte SCE identify buffer");
+
 	PreCmd();
 
 	pioDRQEndTransferFunc = nullptr;
