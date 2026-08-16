@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 //
 // Experimental MagicGate KELF compatibility work based directly on balika011's
-// PCSX2 PR #4274.  This intentionally keeps Sony key material external.
+// PCSX2 PR #4274. This intentionally keeps Sony key material external.
 #pragma once
 
 #include "common/Console.h"
@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,17 +53,17 @@ struct KeyStore
 
 static_assert(sizeof(KeyStore) == 304);
 
-static constexpr std::array<u16, 72> s_memory_card_key_indexes = {
+inline constexpr std::array<u16, 72> s_memory_card_key_indexes = {
 	0x0018, 0xFFFF, 0xFFFF, 0x001C, 0xFFFF, 0xFFFF, 0x0020, 0xFFFF, 0xFFFF, 0x0024, 0xFFFF, 0xFFFF, 0x0028, 0xFFFF, 0xFFFF, 0x002C, 0xFFFF, 0xFFFF,
 	0x0030, 0x0048, 0x0060, 0x0034, 0x004C, 0x0064, 0x0038, 0x0050, 0x0068, 0x003C, 0x0054, 0x006C, 0x0040, 0x0058, 0x0070, 0x0044, 0x005C, 0x0074,
 	0x0000, 0x1000, 0x1001, 0x0004, 0x1002, 0x1003, 0x0008, 0x1004, 0x1005, 0x000C, 0x1006, 0x1007, 0x0010, 0x1008, 0x1009, 0x0014, 0x100A, 0x100B,
 	0x0090, 0x00A8, 0x00A8, 0x0094, 0x00AC, 0x00AC, 0x0098, 0x00B0, 0x00B0, 0x009C, 0x00B4, 0x00B4, 0x00A0, 0x00B8, 0x00B8, 0x00A4, 0x00BC, 0x00BC,
 };
-static constexpr std::array<u16, 4> s_kelf_keys_index = {0x110, 0x110, 0x00C4, 0x015C};
+inline constexpr std::array<u16, 4> s_kelf_keys_index = {0x110, 0x110, 0x00C4, 0x015C};
 
 // kelftool's MBR user-defined header. Restricting the first experiment to this
 // format avoids changing MagicGate behavior for unrelated software.
-static constexpr std::array<u8, 16> s_mbr_user_header = {
+inline constexpr std::array<u8, 16> s_mbr_user_header = {
 	0x01, 0x00, 0x00, 0x04, 0x00, 0x02, 0x01, 0x57,
 	0x07, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A,
 };
@@ -80,12 +81,12 @@ inline bool s_header_attempted = false;
 inline bool s_content_stage_logged = false;
 inline bool s_transform_in_progress = false;
 
-static u16 ReadLE16(const u8* ptr)
+inline u16 ReadLE16(const u8* ptr)
 {
 	return static_cast<u16>(ptr[0] | (static_cast<u16>(ptr[1]) << 8));
 }
 
-static u32 ReadLE32(const u8* ptr)
+inline u32 ReadLE32(const u8* ptr)
 {
 	return static_cast<u32>(ptr[0]) |
 		(static_cast<u32>(ptr[1]) << 8) |
@@ -94,32 +95,33 @@ static u32 ReadLE32(const u8* ptr)
 }
 
 template <size_t N>
-static u16 ReadWord(const std::array<u8, N>& blob, size_t word_index)
+inline u16 ReadWord(const std::array<u8, N>& blob, size_t word_index)
 {
 	const size_t offset = word_index * 2;
 	return (offset + 1 < blob.size()) ? ReadLE16(&blob[offset]) : 0;
 }
 
-static void StoreLE16(u8* dst, u16 value)
+inline void StoreLE16(u8* dst, u16 value)
 {
 	dst[0] = static_cast<u8>(value);
 	dst[1] = static_cast<u8>(value >> 8);
 }
 
-static void Xor8(const u8* input, u8* in_out)
+inline void Xor8(const u8* input, u8* in_out)
 {
 	for (size_t i = 0; i < 8; i++)
 		in_out[i] ^= input[i];
 }
 
 #ifdef _WIN32
-static bool DesCrypt(const u8* key, const u8* input, u8* output, bool decrypt)
+inline bool DesCrypt(const u8* key, const u8* input, u8* output, bool decrypt)
 {
 	BCRYPT_ALG_HANDLE algorithm = nullptr;
 	BCRYPT_KEY_HANDLE key_handle = nullptr;
 	ULONG object_size = 0;
 	ULONG result_size = 0;
 	bool success = false;
+	std::vector<u8> key_object;
 
 	NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_DES_ALGORITHM, nullptr, 0);
 	if (status < 0)
@@ -136,13 +138,13 @@ static bool DesCrypt(const u8* key, const u8* input, u8* output, bool decrypt)
 	if (status < 0 || object_size == 0)
 		goto cleanup;
 
-	{
-		std::vector<u8> key_object(object_size);
-		status = BCryptGenerateSymmetricKey(algorithm, &key_handle, key_object.data(), object_size,
-			reinterpret_cast<PUCHAR>(const_cast<u8*>(key)), 8, 0);
-		if (status < 0)
-			goto cleanup;
+	key_object.resize(object_size);
+	status = BCryptGenerateSymmetricKey(algorithm, &key_handle, key_object.data(), object_size,
+		reinterpret_cast<PUCHAR>(const_cast<u8*>(key)), 8, 0);
+	if (status < 0)
+		goto cleanup;
 
+	{
 		std::array<u8, 8> input_copy = {};
 		std::memcpy(input_copy.data(), input, input_copy.size());
 		ULONG bytes_written = 0;
@@ -167,13 +169,13 @@ cleanup:
 	return success;
 }
 #else
-static bool DesCrypt(const u8*, const u8*, u8*, bool)
+inline bool DesCrypt(const u8*, const u8*, u8*, bool)
 {
 	return false;
 }
 #endif
 
-static bool DesEncrypt(const u8* key, u8* block)
+inline bool DesEncrypt(const u8* key, u8* block)
 {
 	std::array<u8, 8> output = {};
 	if (!DesCrypt(key, block, output.data(), false))
@@ -182,7 +184,7 @@ static bool DesEncrypt(const u8* key, u8* block)
 	return true;
 }
 
-static bool DesDecrypt(const u8* key, u8* block)
+inline bool DesDecrypt(const u8* key, u8* block)
 {
 	std::array<u8, 8> output = {};
 	if (!DesCrypt(key, block, output.data(), true))
@@ -191,18 +193,18 @@ static bool DesDecrypt(const u8* key, u8* block)
 	return true;
 }
 
-static bool DoubleDesEncrypt(const u8* key, u8* block)
+inline bool DoubleDesEncrypt(const u8* key, u8* block)
 {
 	return DesEncrypt(key, block) && DesDecrypt(key + 8, block) && DesEncrypt(key, block);
 }
 
-static bool DoubleDesDecrypt(const u8* key, u8* block)
+inline bool DoubleDesDecrypt(const u8* key, u8* block)
 {
 	return DesDecrypt(key, block) && DesEncrypt(key + 8, block) && DesDecrypt(key, block);
 }
 
 template <size_t N>
-static bool ReadExactBlob(const std::string& directory, const char* filename, std::array<u8, N>* destination)
+inline bool ReadExactBlob(const std::string& directory, const char* filename, std::array<u8, N>* destination)
 {
 	const std::string path = Path::Combine(directory, filename);
 	const std::optional<std::vector<u8>> contents = FileSystem::ReadBinaryFile(path.c_str());
@@ -221,7 +223,7 @@ static bool ReadExactBlob(const std::string& directory, const char* filename, st
 	return true;
 }
 
-static bool ReconstructRetailKeyStore()
+inline bool ReconstructRetailKeyStore()
 {
 	std::memset(&s_key_store, 0, sizeof(s_key_store));
 	u8* const key_store_bytes = reinterpret_cast<u8*>(&s_key_store);
@@ -291,7 +293,7 @@ static bool ReconstructRetailKeyStore()
 	return true;
 }
 
-static bool EnsureKeyMaterial()
+inline bool EnsureKeyMaterial()
 {
 	if (s_key_bios_path != BiosPath)
 	{
@@ -330,7 +332,7 @@ static bool EnsureKeyMaterial()
 	return true;
 }
 
-static bool DecryptAndVerifyMbrHeader()
+inline bool DecryptAndVerifyMbrHeader()
 {
 	const size_t data_size = static_cast<size_t>(cdvd.mg_size);
 	if (data_size < 0x20 || data_size > sizeof(cdvd.mg_buffer))
@@ -529,7 +531,7 @@ static bool DecryptAndVerifyMbrHeader()
 	return true;
 }
 
-static void MaybeTransformBuffer()
+inline void MaybeTransformBuffer()
 {
 	if (s_transform_in_progress)
 		return;
