@@ -1,7 +1,7 @@
 diff --git a/pcsx2/vtlb.cpp b/pcsx2/vtlb.cpp
 --- a/pcsx2/vtlb.cpp
 +++ b/pcsx2/vtlb.cpp
-@@ -1,6 +1,6 @@
+@@ -603,6 +603,6 @@
  // These pages are mapped vaddr->vaddr so the handler is given the virtual
  // address, which the exception needs; the physical side is resolved here.
 -static void* vtlb_WriteProtectedSource(u32 vaddr)
@@ -9,7 +9,7 @@ diff --git a/pcsx2/vtlb.cpp b/pcsx2/vtlb.cpp
  {
  	for (int i = 0; i < 48; i++)
  	{
-@@ -15,28 +15,36 @@
+@@ -617,28 +617,36 @@
  		const bool odd = (vaddr - base) >= pageSize;
  		const EntryLo_t& lo = odd ? tlb[i].EntryLo1 : tlb[i].EntryLo0;
  		if (!lo.V)
