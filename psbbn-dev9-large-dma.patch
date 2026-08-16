@@ -1,7 +1,7 @@
 diff --git a/pcsx2/DEV9/DEV9.cpp b/pcsx2/DEV9/DEV9.cpp
 --- a/pcsx2/DEV9/DEV9.cpp
 +++ b/pcsx2/DEV9/DEV9.cpp
-@@ -369,46 +369,60 @@ void DEV9runFIFO()
+@@ -369,45 +369,60 @@ void DEV9runFIFO()
  {
 -	const bool iopWrite = dev9.xfr_ctrl & SPD_XFR_WRITE; // IOP writes to FIFO
 -	const bool hddRead = dev9.if_ctrl & SPD_IF_READ; // HDD writes to FIFO
@@ -12,14 +12,11 @@ diff --git a/pcsx2/DEV9/DEV9.cpp b/pcsx2/DEV9/DEV9.cpp
 +	{
 +		const bool iopWrite = dev9.xfr_ctrl & SPD_XFR_WRITE; // IOP writes to FIFO
 +		const bool hddRead = dev9.if_ctrl & SPD_IF_READ; // HDD writes to FIFO
-+		const bool iopXfer = (dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
-+		const bool hddXfer = dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN);
  
 -	const bool iopXfer = (dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
 -	const bool hddXfer = dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN);
-+		const int fifoReadBefore = dev9.fifo_bytes_read;
-+		const int fifoWriteBefore = dev9.fifo_bytes_write;
-+		const int iopTransferredBefore = dev9.dma_iop_transfered;
++		const bool iopXfer = (dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
++		const bool hddXfer = dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN);
  
 -	// Order operations based on iopWrite to ensure DMA has data/space to work with.
 -	if (iopWrite)
@@ -27,15 +24,19 @@ diff --git a/pcsx2/DEV9/DEV9.cpp b/pcsx2/DEV9/DEV9.cpp
 -		// Perform DMA from IOP.
 -		if (iopXfer)
 -			IOPWriteFIFO();
++		const int fifoReadBefore = dev9.fifo_bytes_read;
++		const int fifoWriteBefore = dev9.fifo_bytes_write;
++		const int iopTransferredBefore = dev9.dma_iop_transfered;
+ 
+-		// Drain the FIFO
+-		if (hddXfer && !hddRead)
 +		// Order operations based on iopWrite to ensure DMA has data/space to work with.
 +		if (iopWrite)
 +		{
 +			// Perform DMA from IOP.
 +			if (iopXfer)
 +				IOPWriteFIFO();
- 
--		// Drain the FIFO
--		if (hddXfer && !hddRead)
++
 +			// Drain the FIFO
 +			if (hddXfer && !hddRead)
 +				HDDReadFIFO();
