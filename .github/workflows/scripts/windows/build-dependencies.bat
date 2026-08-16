@@ -24,8 +24,8 @@ if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" (
 )
 
 set SEVENZIP="C:\Program Files\7-Zip\7z.exe"
-set PATCH="C:\Program Files\Git\usr\bin\patch.exe"
-set BASH="C:\Program Files\Git\usr\bin\bash.exe"
+set PATCH="B:\Program Files\Git\usr\bin\patch.exe"
+set BASH="B:\Program Files\Git\usr\bin\bash.exe"
 
 set "UNIX_TOOLS=C:\Program Files\Git\usr\bin\"
 
