@@ -5,6 +5,7 @@
 
 #include "CDVDcommon.h"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -91,6 +92,17 @@ struct cdvdTrayTimer
 	TrayStates trayState;
 };
 
+void MagicGateMaybeTransformBuffer();
+
+struct MagicGateBuffer
+{
+	u8 data[65536];
+
+	u8& operator[](size_t index);
+	const u8& operator[](size_t index) const;
+};
+static_assert(sizeof(MagicGateBuffer) == 65536);
+
 struct cdvdStruct
 {
 	u8 nCommand;
@@ -143,7 +155,7 @@ struct cdvdStruct
 	u8 KeyXor;
 	u8 decSet;
 
-	u8 mg_buffer[65536];
+	MagicGateBuffer mg_buffer;
 	int mg_size;
 	int mg_maxsize;
 	int mg_datatype; //0-data(encrypted); 1-header
@@ -154,7 +166,7 @@ struct cdvdStruct
 	u8 Action;        // the currently scheduled emulated action
 	u32 SeekToSector; // Holds the destination sector during seek operations.
 	u32 MaxSector;    // Current disc max sector.
-	u32 ReadTime;     // Avg. time to read one block of data (in Iop cycles)
+	u32 ReadTime;     // Avg. time to read one block in Iop cycles
 	u32 RotSpeed;     // Rotational Speed
 	bool Spinning;    // indicates if the Cdvd is spinning or needs a spinup delay
 	cdvdTrayTimer Tray;
@@ -163,6 +175,8 @@ struct cdvdStruct
 };
 
 extern cdvdStruct cdvd;
+
+#include "CDVD/MagicGateKelf.inl"
 
 extern void cdvdReadLanguageParams(u8* config);
 
@@ -187,4 +201,3 @@ extern bool cdvdLoadDiscElf(ElfObject* elfo, IsoReader& isor, const std::string_
 
 extern s32 cdvdCtrlTrayOpen();
 extern s32 cdvdCtrlTrayClose();
-
