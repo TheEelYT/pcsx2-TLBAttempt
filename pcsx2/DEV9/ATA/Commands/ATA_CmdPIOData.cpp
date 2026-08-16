@@ -97,6 +97,12 @@ void ATA::HDD_ReadPIO(bool isLBA48)
 
 	IDE_CmdLBA48Transform(isLBA48);
 
+	const s64 read_lba = HDD_GetLBA();
+	Console.WriteLn(
+		"DEV9: PSBBN security probe: PIO read cmd=0x%02X lba=%lld sectors=%d lba48=%d "
+		"feature=0x%02X select=0x%02X",
+		regCommand, static_cast<long long>(read_lba), nsector, lba48 ? 1 : 0, regFeature, regSelect);
+
 	regStatus &= ~ATA_STAT_SEEK;
 	if (!HDD_CanSeek())
 	{
