@@ -4,6 +4,7 @@
 #pragma once
 
 #include "R5900.h"
+#include "vtlb.h"
 #include "fmt/format.h"
 
 #define eeAddrInRange(name, addr) \
@@ -256,9 +257,9 @@ static __ri const char* _eelog_GetHwName( u32 addr, T val )
 template< typename T>
 static __ri void eeHwTraceLog( u32 addr, T val, bool mode )
 {
-	// PSBBN Timer 2 probe.  Keep this independent of the normal trace switches so
+	// PSBBN Timer 2 probe. Keep this independent of the normal trace switches so
 	// one boot captures the complete lifetime of the timer, including PS2SDK crt0.
-	const bool timer2_probe = (addr == RCNT2_MODE || addr == RCNT2_TARGET);
+	const bool timer2_probe = (addr == RCNT2_COUNT || addr == RCNT2_MODE || addr == RCNT2_TARGET);
 	const bool normal_trace = IsDevBuild && EmuConfig.Trace.Enabled && _eelog_enabled(addr);
 	if (!timer2_probe && !normal_trace)
 		return;
@@ -289,10 +290,23 @@ static __ri void eeHwTraceLog( u32 addr, T val, bool mode )
 
 	if (timer2_probe)
 	{
-		const char* regname = (addr == RCNT2_MODE) ? "RCNT2_MODE" : "RCNT2_TARGET";
-		Console.WriteLn("[T2PROBE] pc=%08X cycle=%llu %s @ %08X/%s %s %s",
-			cpuRegs.pc, static_cast<unsigned long long>(cpuRegs.cycle), labelStr.c_str(), addr,
-			regname, mode ? "->" : "<-", valStr.c_str());
+		using namespace vtlb_private;
+		constexpr u32 normal_addr = RCNT2_MODE;
+		constexpr u32 kseg_addr = RCNT2_MODE | 0xA0000000u;
+		const VTLBVirtual& normal_map = vtlbdata.vmap[normal_addr >> VTLB_PAGE_BITS];
+		const VTLBVirtual& kseg_map = vtlbdata.vmap[kseg_addr >> VTLB_PAGE_BITS];
+		const bool normal_handler = normal_map.isHandler(normal_addr);
+		const bool kseg_handler = kseg_map.isHandler(kseg_addr);
+		const int normal_id = normal_handler ? normal_map.assumeHandlerGetID() : -1;
+		const int kseg_id = kseg_handler ? kseg_map.assumeHandlerGetID() : -1;
+		const u32 normal_paddr = normal_handler ? normal_map.assumeHandlerGetPAddr(normal_addr) : 0xFFFFFFFFu;
+		const u32 kseg_paddr = kseg_handler ? kseg_map.assumeHandlerGetPAddr(kseg_addr) : 0xFFFFFFFFu;
+		const char* regname = (addr == RCNT2_COUNT) ? "RCNT2_COUNT" : ((addr == RCNT2_MODE) ? "RCNT2_MODE" : "RCNT2_TARGET");
+		Console.WriteLn("[T2PROBE] pc=%08X ra=%08X cycle=%llu asid=%02X %s @ %08X/%s %s %s map1000=%c:id%d:p%08X mapB000=%c:id%d:p%08X",
+			cpuRegs.pc, cpuRegs.GPR.n.ra.UL[0], static_cast<unsigned long long>(cpuRegs.cycle), cpuRegs.CP0.n.EntryHi & 0xFF,
+			labelStr.c_str(), addr, regname, mode ? "->" : "<-", valStr.c_str(),
+			normal_handler ? 'H' : 'D', normal_id, normal_paddr,
+			kseg_handler ? 'H' : 'D', kseg_id, kseg_paddr);
 	}
 
 	if (!normal_trace)
