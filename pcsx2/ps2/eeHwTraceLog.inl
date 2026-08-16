@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "R5900.h"
 #include "fmt/format.h"
 
 #define eeAddrInRange(name, addr) \
@@ -255,9 +256,12 @@ static __ri const char* _eelog_GetHwName( u32 addr, T val )
 template< typename T>
 static __ri void eeHwTraceLog( u32 addr, T val, bool mode )
 {
-	if (!IsDevBuild) return;
-	if (!EmuConfig.Trace.Enabled) return;
-	if (!_eelog_enabled(addr)) return;
+	// PSBBN Timer 2 probe.  Keep this independent of the normal trace switches so
+	// one boot captures the complete lifetime of the timer, including PS2SDK crt0.
+	const bool timer2_probe = (addr == RCNT2_MODE || addr == RCNT2_TARGET);
+	const bool normal_trace = IsDevBuild && EmuConfig.Trace.Enabled && _eelog_enabled(addr);
+	if (!timer2_probe && !normal_trace)
+		return;
 
 	std::string labelStr(fmt::format("Hw{}{}", mode ? "Read" : "Write", sizeof(T) * 8));
 	std::string valStr;
@@ -282,6 +286,17 @@ static __ri void eeHwTraceLog( u32 addr, T val, bool mode )
 	{
 		valStr = StringUtil::U128ToString(r128_to_u128(val));
 	}
+
+	if (timer2_probe)
+	{
+		const char* regname = (addr == RCNT2_MODE) ? "RCNT2_MODE" : "RCNT2_TARGET";
+		Console.WriteLn("[T2PROBE] pc=%08X cycle=%llu %s @ %08X/%s %s %s",
+			cpuRegs.pc, static_cast<unsigned long long>(cpuRegs.cycle), labelStr.c_str(), addr,
+			regname, mode ? "->" : "<-", valStr.c_str());
+	}
+
+	if (!normal_trace)
+		return;
 
 	static const char* temp = "%-12s @ 0x%08X/%-16s %s %s";
 
