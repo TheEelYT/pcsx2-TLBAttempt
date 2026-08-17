@@ -238,6 +238,83 @@ static bool tlbSlotIsInstalled(const tlbs& t)
 	return t.isGlobal() || (t.EntryHi.ASID == tlbInstalledASID);
 }
 
+// Temporary PSBBN TLB state probe. Logging only; no emulation behavior changes.
+static int psbbnTlbStateTraceCount = 0;
+static int psbbnTlbCacheWarnCount = 0;
+static int psbbnTlbAsidTraceCount = 0;
+
+static bool psbbnTlbTouchesRegion(const tlbs& t)
+{
+	const u64 base = t.VPN2();
+	const u64 pageSize = static_cast<u64>(t.Mask() + 1) << 12;
+	const u64 end = base + pageSize * 2;
+	return base < 0x0FC00000ULL && end > 0x0FB00000ULL;
+}
+
+static tlbs psbbnIncomingTlb()
+{
+	tlbs t{};
+	t.PageMask.UL = cpuRegs.CP0.n.PageMask;
+	t.EntryHi.UL = cpuRegs.CP0.n.EntryHi;
+	t.EntryLo0.UL = cpuRegs.CP0.n.EntryLo0;
+	t.EntryLo1.UL = cpuRegs.CP0.n.EntryLo1;
+	return t;
+}
+
+static bool psbbnAnyInterestingTlbSlot()
+{
+	for (int i = 0; i < 48; i++)
+	{
+		if (psbbnTlbTouchesRegion(tlb[i]))
+			return true;
+	}
+	return false;
+}
+
+static void psbbnCheckCachedTlbCount(const char* op, u32 index)
+{
+	if (cachedTlbs.count < 44 || psbbnTlbCacheWarnCount >= 128)
+		return;
+	const int id = ++psbbnTlbCacheWarnCount;
+	Console.Error(
+		"PSBBN TLBCACHE[%03d] op=%s idx=%u pc=%08X code=%08X cachedTlbs.count=%u",
+		id, op, index, cpuRegs.pc, cpuRegs.code, cachedTlbs.count);
+}
+
+static int psbbnTlbStateBegin(const char* op, u32 index, const tlbs& oldSlot)
+{
+	const tlbs incoming = psbbnIncomingTlb();
+	if ((!psbbnTlbTouchesRegion(oldSlot) && !psbbnTlbTouchesRegion(incoming)) ||
+		psbbnTlbStateTraceCount >= 512)
+		return 0;
+
+	const int id = ++psbbnTlbStateTraceCount;
+	Console.Error(
+		"PSBBN TLBSTATE[%03d] PRE op=%s idx=%u pc=%08X code=%08X installedASID=%02X cached=%u "
+		"oldVPN2=%08X oldASID=%02X oldLo0=%08X oldLo1=%08X oldResident=%u "
+		"inVPN2=%08X inASID=%02X PageMask=%08X inLo0=%08X inLo1=%08X V0=%u D0=%u V1=%u D1=%u",
+		id, op, index, cpuRegs.pc, cpuRegs.code, tlbInstalledASID & 0xff, cachedTlbs.count,
+		oldSlot.VPN2(), oldSlot.EntryHi.ASID, oldSlot.EntryLo0.UL, oldSlot.EntryLo1.UL,
+		tlbSlotIsInstalled(oldSlot) ? 1u : 0u,
+		incoming.VPN2(), incoming.EntryHi.ASID, incoming.PageMask.UL,
+		incoming.EntryLo0.UL, incoming.EntryLo1.UL,
+		incoming.EntryLo0.V, incoming.EntryLo0.D, incoming.EntryLo1.V, incoming.EntryLo1.D);
+	return id;
+}
+
+static void psbbnTlbStateEnd(int id, const char* op, u32 index, const tlbs& slot)
+{
+	if (!id)
+		return;
+	Console.Error(
+		"PSBBN TLBSTATE[%03d] POST op=%s idx=%u installedASID=%02X cached=%u "
+		"newVPN2=%08X newASID=%02X newLo0=%08X newLo1=%08X V0=%u D0=%u V1=%u D1=%u resident=%u",
+		id, op, index, tlbInstalledASID & 0xff, cachedTlbs.count,
+		slot.VPN2(), slot.EntryHi.ASID, slot.EntryLo0.UL, slot.EntryLo1.UL,
+		slot.EntryLo0.V, slot.EntryLo0.D, slot.EntryLo1.V, slot.EntryLo1.D,
+		tlbSlotIsInstalled(slot) ? 1u : 0u);
+}
+
 void MapTLB(const tlbs& t, int i)
 {
 	u32 mask, addr;
@@ -474,8 +551,12 @@ namespace COP0 {
 		COP0_LOG("COP0_TLBWI %d:%x,%x,%x,%x",
 			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		psbbnCheckCachedTlbCount("TLBWI", j);
+		const tlbs psbbnOldSlot = tlb[j];
+		const int psbbnTraceId = psbbnTlbStateBegin("TLBWI", j, psbbnOldSlot);
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
+		psbbnTlbStateEnd(psbbnTraceId, "TLBWI", j, tlb[j]);
 	}
 
 	void TLBWR()
@@ -493,8 +574,12 @@ namespace COP0 {
 		COP0_LOG("COP0_TLBWR %d:%x,%x,%x,%x\n",
 			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+		psbbnCheckCachedTlbCount("TLBWR", j);
+		const tlbs psbbnOldSlot = tlb[j];
+		const int psbbnTraceId = psbbnTlbStateBegin("TLBWR", j, psbbnOldSlot);
 		UnmapTLB(tlb[j], j);
 		WriteTLB(j);
+		psbbnTlbStateEnd(psbbnTraceId, "TLBWR", j, tlb[j]);
 	}
 
 	void TLBP()
@@ -601,6 +686,15 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 				// they overlap, so interleaving would leave the unmaps
 				// stamping on mappings just installed.
 				const u32 newASID = cpuRegs.GPR.r[_Rt_].UL[0] & 0xff;
+
+				if (newASID != tlbInstalledASID && psbbnAnyInterestingTlbSlot() && psbbnTlbAsidTraceCount < 256)
+				{
+					const int id = ++psbbnTlbAsidTraceCount;
+					Console.Error(
+						"PSBBN TLBASID[%03d] pc=%08X code=%08X oldInstalled=%02X oldEntryHi=%08X newEntryHi=%08X newASID=%02X cached=%u",
+						id, cpuRegs.pc, cpuRegs.code, tlbInstalledASID & 0xff, cpuRegs.CP0.n.EntryHi,
+						cpuRegs.GPR.r[_Rt_].UL[0], newASID, cachedTlbs.count);
+				}
 
 				cpuRegs.CP0.n.EntryHi = cpuRegs.GPR.r[_Rt_].UL[0];
 
