@@ -888,7 +888,7 @@ int isBreakpointNeeded(u32 addr)
 		bpFlags += 1;
 
 	// there may be a breakpoint in the delay slot
-	if (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))
+	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr + 4) && isBranchOrJump(addr))
 		bpFlags += 2;
 
 	return bpFlags;
