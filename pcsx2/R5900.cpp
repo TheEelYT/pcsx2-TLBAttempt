@@ -207,6 +207,39 @@ void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 	// is what the match is against.
 	eeTlbInvalidMatch = eeTlbMatches(addr);
 
+	// Temporary PSBBN probe: capture the actual TLB exception being raised,
+	// rather than stale CP0 state left by the previous exception. Restrict it
+	// to the 0x0FBxxxxx userspace region where the PSBBN fault occurs.
+	static int psbbnTlbExTraceCount = 0;
+	const u32 psbbnExc = excode & 0x7C;
+	const char* psbbnKind = (psbbnExc == EXC_CODE(1)) ? "MOD" :
+		(psbbnExc == EXC_CODE(2)) ? "TLBL" :
+		(psbbnExc == EXC_CODE(3)) ? "TLBS" : "OTHER";
+	const u32 psbbnIncomingPc = cpuRegs.pc;
+	const u32 psbbnIncomingCode = cpuRegs.code;
+	const u32 psbbnIncomingEntryHi = cpuRegs.CP0.n.EntryHi;
+	const u32 psbbnIncomingAsid = psbbnIncomingEntryHi & 0xff;
+	const bool psbbnInRegion = ((psbbnIncomingPc & 0xFFF00000u) == 0x0FB00000u) ||
+		((addr & 0xFFF00000u) == 0x0FB00000u);
+	const bool psbbnTrace = psbbnInRegion && psbbnTlbExTraceCount < 512;
+	const int psbbnTraceId = psbbnTrace ? ++psbbnTlbExTraceCount : 0;
+
+	if (psbbnTrace)
+	{
+		Console.Error(
+			"PSBBN TLBEX[%03d] PRE kind=%s core=%s pc=%08X code=%08X addr=%08X bd=%u ASID=%02X invalid=%u EntryHi=%08X",
+			psbbnTraceId,
+			psbbnKind,
+			(Cpu == &intCpu) ? "INT" : "REC",
+			psbbnIncomingPc,
+			psbbnIncomingCode,
+			addr,
+			bd,
+			psbbnIncomingAsid,
+			eeTlbInvalidMatch ? 1u : 0u,
+			psbbnIncomingEntryHi);
+	}
+
 	// Avoid too much spamming on the interpreter
 	if (Cpu != &intCpu || IsDebugBuild) {
 		Console.Error("cpuTlbMiss pc:%x, cycl:%llx, addr: %x, status=%x, code=%x",
@@ -220,6 +253,19 @@ void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 
 	cpuRegs.pc -= 4;
 	cpuException(excode, bd);
+
+	if (psbbnTrace)
+	{
+		Console.Error(
+			"PSBBN TLBEX[%03d] POST kind=%s EPC=%08X Cause=%08X BadVAddr=%08X EntryHi=%08X vectorPC=%08X",
+			psbbnTraceId,
+			psbbnKind,
+			cpuRegs.CP0.n.EPC,
+			cpuRegs.CP0.n.Cause,
+			cpuRegs.CP0.n.BadVAddr,
+			cpuRegs.CP0.n.EntryHi,
+			cpuRegs.pc);
+	}
 }
 
 // Store to a page whose EntryLo.D is clear. Vectors to 0x180 like any other

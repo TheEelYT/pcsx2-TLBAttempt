@@ -602,7 +602,7 @@ static __ri void vtlb_Modified(u32 addr)
 
 // These pages are mapped vaddr->vaddr so the handler is given the virtual
 // address, which the exception needs; the physical side is resolved here.
-static void* vtlb_WriteProtectedSource(u32 vaddr)
+static bool vtlb_WriteProtectedPAddr(u32 vaddr, u32* paddr)
 {
 	for (int i = 0; i < 48; i++)
 	{
@@ -617,30 +617,38 @@ static void* vtlb_WriteProtectedSource(u32 vaddr)
 		const bool odd = (vaddr - base) >= pageSize;
 		const EntryLo_t& lo = odd ? tlb[i].EntryLo1 : tlb[i].EntryLo0;
 		if (!lo.V)
-			return nullptr;
+			return false;
 
-		const u32 paddr = (odd ? tlb[i].PFN1() : tlb[i].PFN0()) + ((vaddr - base) & (pageSize - 1));
-		if (!eeMem || (paddr + 16) > Ps2MemSize::ExposedRam)
-			return nullptr;
+		const u32 resolved_paddr =
+			(odd ? tlb[i].PFN1() : tlb[i].PFN0()) + ((vaddr - base) & (pageSize - 1));
+		if (resolved_paddr >= VTLB_PMAP_SZ)
+			return false;
 
-		return &eeMem->Main[paddr];
+		*paddr = resolved_paddr;
+		return true;
 	}
-	return nullptr;
+	return false;
 }
 
 template <typename OperandType>
 static OperandType vtlbWriteProtReadSm(u32 addr)
 {
-	OperandType value = 0;
-	if (const void* src = vtlb_WriteProtectedSource(addr))
-		std::memcpy(&value, src, sizeof(OperandType));
-	return value;
+	u32 paddr;
+	if (!vtlb_WriteProtectedPAddr(addr, &paddr))
+		return 0;
+
+	// EntryLo.D only controls whether stores raise TLB Modified; reads still
+	// access the translated physical page. Use KSEG1 to route the read back
+	// through the normal physical map so RAM, ROM and MMIO handlers all work.
+	return vtlb_memRead<OperandType>(0xA0000000u | paddr);
 }
 static RETURNS_R128 vtlbWriteProtReadLg(u32 addr)
 {
-	if (const void* src = vtlb_WriteProtectedSource(addr))
-		return r128_load(src);
-	return r128_zero();
+	u32 paddr;
+	if (!vtlb_WriteProtectedPAddr(addr, &paddr))
+		return r128_zero();
+
+	return vtlb_memRead128(0xA0000000u | paddr);
 }
 
 template <typename OperandType>

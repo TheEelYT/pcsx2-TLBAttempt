@@ -389,49 +389,64 @@ void FIFOIntr()
 // Both might have to set to the same direction for (SPEED <-> HDD) to work
 void DEV9runFIFO()
 {
-	const bool iopWrite = dev9.xfr_ctrl & SPD_XFR_WRITE; // IOP writes to FIFO
-	const bool hddRead = dev9.if_ctrl & SPD_IF_READ; // HDD writes to FIFO
-
-	const bool iopXfer = (dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
-	const bool hddXfer = dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN);
-
-	// Order operations based on iopWrite to ensure DMA has data/space to work with.
-	if (iopWrite)
+	// The SPEED FIFO is 8 KiB, but IOP DMA blocks can be larger. Keep
+	// pumping while either side makes progress so one DMA can span multiple
+	// FIFO fills/drains.
+	for (;;)
 	{
-		// Perform DMA from IOP.
-		if (iopXfer)
-			IOPWriteFIFO();
+		const bool iopWrite = dev9.xfr_ctrl & SPD_XFR_WRITE; // IOP writes to FIFO
+		const bool hddRead = dev9.if_ctrl & SPD_IF_READ; // HDD writes to FIFO
 
-		// Drain the FIFO
-		if (hddXfer && !hddRead)
+		const bool iopXfer = (dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
+		const bool hddXfer = dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN);
+
+		const int fifoReadBefore = dev9.fifo_bytes_read;
+		const int fifoWriteBefore = dev9.fifo_bytes_write;
+		const int iopTransferredBefore = dev9.dma_iop_transfered;
+
+		// Order operations based on iopWrite to ensure DMA has data/space to work with.
+		if (iopWrite)
 		{
-			HDDReadFIFO();
+			// Perform DMA from IOP.
+			if (iopXfer)
+				IOPWriteFIFO();
+
+			// Drain the FIFO
+			if (hddXfer && !hddRead)
+				HDDReadFIFO();
 		}
-	}
-	else
-	{
-		// Ensure FIFO has data.
-		if (hddXfer && hddRead)
+		else
 		{
-			HDDWriteFIFO();
-		}
-
-		if (iopXfer)
-		{
-			// Perform DMA to IOP.
-			IOPReadFIFO();
-
-			// Refill FIFO after DMA.
-			// Need to recheck dmaReady incase prior
-			// HDDWriteFIFO competed the transfer from HDD
-			if (hddXfer && hddRead && dev9.ata->dmaReady)
-			{
+			// Ensure FIFO has data.
+			if (hddXfer && hddRead)
 				HDDWriteFIFO();
+
+			if (iopXfer)
+			{
+				// Perform DMA to IOP.
+				IOPReadFIFO();
+
+				// Refill FIFO after DMA. Recheck dmaReady because the first
+				// HDDWriteFIFO may have completed the ATA transfer.
+				if (hddRead && dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN))
+					HDDWriteFIFO();
 			}
 		}
-	}
 
-	FIFOIntr();
+		FIFOIntr();
+
+		if (dev9.fifo_bytes_read == fifoReadBefore &&
+			dev9.fifo_bytes_write == fifoWriteBefore &&
+			dev9.dma_iop_transfered == iopTransferredBefore)
+		{
+			break;
+		}
+
+		// Once the IOP DMA finishes, preserve the old behavior and return to
+		// the caller instead of prefetching/draining unrelated future data.
+		if (iopXfer && dev9.dma_iop_ptr == nullptr)
+			break;
+	}
 }
 
 u16 SpeedRead(u32 addr, int width)
@@ -1081,7 +1096,6 @@ void DEV9readDMA8Mem(u32* pMem, int size)
 	{
 		if (!(dev9.xfr_ctrl & SPD_XFR_WRITE))
 		{
-			pxAssert(size <= SPD_DBUF_AVAIL_MAX * 512);
 			dev9.dma_iop_ptr = reinterpret_cast<u8*>(pMem);
 			dev9.dma_iop_size = size;
 			dev9.dma_iop_transfered = 0;
@@ -1111,7 +1125,6 @@ void DEV9writeDMA8Mem(u32* pMem, int size)
 	{
 		if (dev9.xfr_ctrl & SPD_XFR_WRITE)
 		{
-			pxAssert(size <= SPD_DBUF_AVAIL_MAX * 512);
 			dev9.dma_iop_ptr = reinterpret_cast<u8*>(pMem);
 			dev9.dma_iop_size = size;
 			dev9.dma_iop_transfered = 0;
