@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent
 TARGET = ROOT / "pcsx2" / "vtlb.cpp"
 BACKUP = TARGET.with_name("vtlb.cpp.pre-tlbmod-opcode-probe")
 
-OLD = r'''static __ri void vtlb_Modified(u32 addr)
+BASE = r'''static __ri void vtlb_Modified(u32 addr)
 {
 	if (Cpu == &intCpu)
 	{
@@ -23,7 +23,7 @@ OLD = r'''static __ri void vtlb_Modified(u32 addr)
 }
 '''
 
-NEW = r'''static __ri void vtlb_Modified(u32 addr)
+EXACT = r'''static __ri void vtlb_Modified(u32 addr)
 {
 	// Temporary PSBBN probe: capture the raw EE opcode for the repeating
 	// TLB Modified fault we've isolated in the PSBBN userspace process.
@@ -34,6 +34,41 @@ NEW = r'''static __ri void vtlb_Modified(u32 addr)
 			cpuRegs.pc,
 			cpuRegs.code,
 			addr,
+			cpuRegs.CP0.n.EntryHi & 0xff,
+			cpuRegs.CP0.n.EntryHi,
+			cpuRegs.CP0.n.EntryLo0,
+			cpuRegs.CP0.n.EntryLo1);
+	}
+
+	if (Cpu == &intCpu)
+	{
+		cpuTlbModified(addr, cpuRegs.branch);
+		Cpu->CancelInstruction();
+		return;
+	}
+
+	static int spamStop = 0;
+	if (spamStop++ < 50 || IsDevBuild)
+		Console.Error("TLB Modified, pc=0x%x addr=0x%x", cpuRegs.pc, addr);
+}
+'''
+
+BROAD = r'''static __ri void vtlb_Modified(u32 addr)
+{
+	// Temporary PSBBN probe. Do not assume the saved fault pair repeats:
+	// log the first TLB Modified events so we can identify the actual hot fault.
+	static int psbbnTlbmodTraceCount = 0;
+	if (psbbnTlbmodTraceCount++ < 256)
+	{
+		Console.Error(
+			"PSBBN TLBMOD[%03d]: core=%s pc=%08X code=%08X addr=%08X EPC=%08X Cause=%08X ASID=%02X EntryHi=%08X EntryLo0=%08X EntryLo1=%08X",
+			psbbnTlbmodTraceCount,
+			(Cpu == &intCpu) ? "INT" : "REC",
+			cpuRegs.pc,
+			cpuRegs.code,
+			addr,
+			cpuRegs.CP0.n.EPC,
+			cpuRegs.CP0.n.Cause,
 			cpuRegs.CP0.n.EntryHi & 0xff,
 			cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0,
@@ -65,23 +100,28 @@ def apply() -> None:
 
     text = TARGET.read_text(encoding="utf-8")
 
-    if NEW in text:
-        print("TLBMOD opcode probe is already applied.")
+    if BROAD in text:
+        print("Broad TLBMOD probe is already applied.")
         return
 
-    if OLD not in text:
-        die("Expected vtlb_Modified() block was not found. Refusing to modify the file.")
+    if EXACT in text:
+        # The first probe already made the backup. Preserve it so --restore
+        # still returns to the exact pre-probe working tree.
+        TARGET.write_text(text.replace(EXACT, BROAD, 1), encoding="utf-8")
+        print(f"Upgraded exact-match probe to broad TLBMOD trace in:\n  {TARGET}")
+        print("Existing pre-probe backup was preserved.")
+        return
 
-    if BACKUP.exists():
-        die(f"Backup already exists: {BACKUP}. Restore or remove it before applying again.")
+    if BASE in text:
+        if BACKUP.exists():
+            die(f"Backup already exists: {BACKUP}. Refusing to overwrite it.")
+        shutil.copy2(TARGET, BACKUP)
+        TARGET.write_text(text.replace(BASE, BROAD, 1), encoding="utf-8")
+        print(f"Applied broad PSBBN TLBMOD trace to:\n  {TARGET}")
+        print(f"Backup saved as:\n  {BACKUP}")
+        return
 
-    shutil.copy2(TARGET, BACKUP)
-    TARGET.write_text(text.replace(OLD, NEW, 1), encoding="utf-8")
-
-    print(f"Applied targeted PSBBN TLBMOD opcode probe to:\n  {TARGET}")
-    print(f"Backup saved as:\n  {BACKUP}")
-    print("Rebuild PCSX2, reproduce the PSBBN hang, then look for:")
-    print("  PSBBN TLBMOD: pc=0FB64BF8 code=........ addr=0FB60364 ...")
+    die("Expected vtlb_Modified() block was not found. Refusing to modify the file.")
 
 
 def restore() -> None:
@@ -90,12 +130,12 @@ def restore() -> None:
 
     shutil.copy2(BACKUP, TARGET)
     BACKUP.unlink()
-    print(f"Restored original source:\n  {TARGET}")
+    print(f"Restored exact pre-probe source:\n  {TARGET}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Apply or restore the PSBBN TLB Modified opcode probe.")
-    parser.add_argument("--restore", action="store_true", help="restore vtlb.cpp from the probe backup")
+    parser = argparse.ArgumentParser(description="Apply or restore the PSBBN broad TLB Modified probe.")
+    parser.add_argument("--restore", action="store_true", help="restore vtlb.cpp from the original pre-probe backup")
     args = parser.parse_args()
 
     if args.restore:
