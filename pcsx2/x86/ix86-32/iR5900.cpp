@@ -852,10 +852,14 @@ static uptr psbbnGetTlbJitTarget()
 			cpuRegs.CP0.n.EntryHi & 0xFF);
 	}
 
-	// KSEG and friends keep using normal recLUT dispatch.
-	if (vpc >= 0x80000000u)
+	// KSEG0/KSEG1 are direct-mapped and continue using the normal recLUT.
+	//
+	// KUSEG (00000000-7FFFFFFF) and KSEG2/KSEG3
+	// (C0000000-FFFFFFFF) are TLB-mapped and need the sparse
+	// 4K TLB JIT path.
+	if (vpc >= 0x80000000u && vpc < 0xC0000000u)
 		return 0;
-
+	
 	bool valid = false;
 	u32 paddr = 0;
 	const bool matched = psbbnLookupTlb(vpc, &valid, &paddr);
@@ -916,6 +920,21 @@ static uptr psbbnGetTlbJitTarget()
 			page_key,
 			std::move(page)).first;
 	}
+
+	if (vpc >= 0xC0000000u)
+	{
+		static u64 highTlbDispatchCount = 0;
+		const u64 id = ++highTlbDispatchCount;
+
+		if (id <= 100 || (id % 100000) == 0)
+		{
+			Console.Error(
+				"PSBBN TLBJITHIGH[%llu] pc=%08X ASID=%02X",
+				id,
+				vpc,
+				cpuRegs.CP0.n.EntryHi & 0xFF);
+		}
+}
 
 	TlbJitPage& page = *it->second;
 	const u32 slot = (vpc & 0xFFFu) >> 2;
@@ -1265,6 +1284,10 @@ static void recError(u32 error)
 		case 0:
 		{
 			const u32 vpc = cpuRegs.pc;
+			
+			const bool tlbMappedCodeSegment =
+				(vpc < 0x80000000u) ||
+				(vpc >= 0xC0000000u);
 
 			static u64 psbbnRecFetchCount = 0;
 			const u64 psbbnFetchId = ++psbbnRecFetchCount;
@@ -1289,7 +1312,7 @@ static void recError(u32 error)
 			}
 
 			// An unmapped/invalid KUSEG instruction fetch is a guest TLBL.
-			if (vpc < 0x80000000u && (!matched || !valid))
+			if (tlbMappedCodeSegment && (!matched || !valid))
 			{
 				Console.Error(
 					"PSBBN RECFETCH raising instruction TLBL for %08X",
@@ -1304,7 +1327,7 @@ static void recError(u32 error)
 			}
 
 			// Temporary correctness bridge for valid TLB-mapped KUSEG code.
-			if (vpc < 0x80000000u && matched && valid)
+			if (tlbMappedCodeSegment && matched && valid)
 			{
 				if (psbbnLogFetch)
 				{
@@ -2194,10 +2217,16 @@ static void iBranchTest(u32 newpc)
 		xMOV(ptr64[&cpuRegs.cycle], rax); // update cycles
 		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
 
-		if (newpc == 0xffffffff || newpc < 0x80000000u)
+		if (newpc == 0xffffffff ||
+			newpc < 0x80000000u ||
+			newpc >= 0xC0000000u)
+		{
 			xJS(DispatcherReg);
+		}
 		else
+		{
 			recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
+		}
 		xJMP((void*)DispatcherEvent);
 	}
 }
