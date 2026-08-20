@@ -108,6 +108,23 @@ struct TlbJitPage
 
 static std::unordered_map<u64, std::unique_ptr<TlbJitPage>> s_tlbJitPages;
 
+static bool s_tlbJitCompiling = false;
+static u32 s_tlbJitCompileVPage = 0;
+static u32 s_tlbJitCompilePPage = 0;
+
+static __fi int* tlbJitCodePtr(u32 vaddr)
+{
+	u32 addr = vaddr;
+
+	if (s_tlbJitCompiling &&
+		(vaddr & ~0xFFFu) == s_tlbJitCompileVPage)
+	{
+		addr = s_tlbJitCompilePPage | (vaddr & 0xFFFu);
+	}
+
+	return (int*)PSM(addr);
+}
+
 static u8* recPtrEnd = nullptr;
 EEINST* s_pInstCache = nullptr;
 static u32 s_nInstCacheSize = 0;
@@ -413,6 +430,7 @@ static void dyna_page_reset(u32 start, u32 sz);
 static void recError(u32 error);
 static uptr psbbnGetTlbJitTarget();
 static void psbbnTlbJitFallback();
+static void psbbnRecompileTlbOne();
 
 static const void* DispatcherEvent = nullptr;
 static const void* DispatcherReg = nullptr;
@@ -461,13 +479,10 @@ static const void* _DynGen_TlbJITCompile()
 {
 	u8* retval = xGetAlignedCallTarget();
 
-	// Phase 1 only:
-	// prove the sparse 4K dispatch/cache plumbing before replacing
-	// this with the real TLB-aware native compiler.
-	xFastCall((const void*)psbbnTlbJitFallback);
+	xFastCall((const void*)psbbnRecompileTlbOne);
 
-	// psbbnTlbJitFallback currently exits recompiled execution, but
-	// keep a safe continuation here in case that changes later.
+	// If compilation succeeded, DispatcherReg will now find the newly
+	// generated native target in this page/slot.
 	xJMP(DispatcherReg);
 
 	return retval;
@@ -500,6 +515,75 @@ static u32 psbbnShouldInterpretKuseg()
 	// Missing/invalid mappings need an instruction TLBL.
 	// Non-identity mappings need the temporary TLB-aware fallback.
 	return 1;
+}
+
+static bool tlbJitCanCompileOne(u32 code)
+{
+	const u32 op = code >> 26;
+
+	switch (op)
+	{
+		case 0: // SPECIAL
+		{
+			switch (code & 0x3F)
+			{
+				// Control flow / exceptions.
+				case 8:  // JR
+				case 9:  // JALR
+				case 12: // SYSCALL
+				case 13: // BREAK
+
+				// Arithmetic overflow / traps.
+				case 32: // ADD
+				case 34: // SUB
+				case 44: // DADD
+				case 46: // DSUB
+				case 48: // TGE
+				case 49: // TGEU
+				case 50: // TLT
+				case 52: // TLTU
+				case 54: // TEQ
+					return false;
+
+				default:
+					return true;
+			}
+		}
+
+		// REGIMM includes branches and trap-immediates.
+		case 1:
+
+		// Jumps / branches.
+		case 2:
+		case 3:
+		case 4:
+		case 5:
+		case 6:
+		case 7:
+		case 20:
+		case 21:
+		case 22:
+		case 23:
+
+		// Overflowing immediate arithmetic.
+		case 8:  // ADDI
+		case 24: // DADDI
+
+		// Keep COP0/COP1/COP2 out of the first prototype.
+		case 16:
+		case 17:
+		case 18:
+
+		// COP load/store paths can come later.
+		case 49: // LWC1
+		case 54: // LQC2
+		case 57: // SWC1
+		case 62: // SQC2
+			return false;
+
+		default:
+			return true;
+	}
 }
 
 // called when jumping to variable pc address
@@ -732,6 +816,151 @@ static uptr psbbnGetTlbJitTarget()
 	const u32 slot = (vpc & 0xFFFu) >> 2;
 
 	return page.blocks[slot].GetFnptr();
+}
+
+static void psbbnRecompileTlbOne()
+{
+	const u32 startpc = cpuRegs.pc;
+
+	bool valid = false;
+	u32 paddr = 0;
+	const bool matched = psbbnLookupTlb(startpc, &valid, &paddr);
+
+	if (!matched || !valid)
+	{
+		cpuRegs.pc = startpc + 4;
+		cpuTlbMissR(startpc, 0);
+		recExitExecution();
+	}
+
+	if (paddr == startpc)
+		return;
+
+	const u32 vpage = startpc & ~0xFFFu;
+	const u32 ppage = paddr & ~0xFFFu;
+	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xFF;
+
+	const u64 page_key =
+		(static_cast<u64>(asid) << 32) |
+		static_cast<u64>(vpage);
+
+	auto it = s_tlbJitPages.find(page_key);
+	if (it == s_tlbJitPages.end())
+		return;
+
+	TlbJitPage& page = *it->second;
+
+	if (page.virtual_page != vpage ||
+		page.physical_page != ppage ||
+		page.asid != asid)
+	{
+		return;
+	}
+
+	const u32 slot = (startpc & 0xFFFu) >> 2;
+	const u32 code = *(u32*)PSM(paddr);
+
+	// Anything tricky stays on our known-good interpreter bridge.
+	if (!tlbJitCanCompileOne(code))
+	{
+		intCpu.Step();
+		recExitExecution();
+	}
+
+	if (recPtr >= recPtrEnd)
+	{
+		eeRecNeedsReset = true;
+		recExitExecution();
+	}
+
+	xSetTextPtr(R5900_TEXTPTR);
+	xSetPtr(recPtr);
+	recPtr = xGetAlignedCallTarget();
+
+	u8* const block_start = recPtr;
+
+	s_pCurBlock = &page.blocks[slot];
+	s_pCurBlockEx = &page.block_ex[slot];
+
+	*s_pCurBlockEx = {};
+	s_pCurBlockEx->startpc = startpc;
+	s_pCurBlockEx->fnptr = reinterpret_cast<uptr>(block_start);
+
+	s_nBlockCycles = 0;
+	s_nBlockInterlocked = false;
+	s_nBlockFF = false;
+	s_branchTo = 0xFFFFFFFFu;
+	g_branch = 0;
+
+	pc = startpc;
+
+	g_cpuHasConstReg = g_cpuFlushedConstReg = 1;
+
+	_initX86regs();
+	_initXMMregs();
+
+	// Minimal one-instruction register analysis.
+	if (s_nInstCacheSize < 2)
+	{
+		free(s_pInstCache);
+		s_nInstCacheSize = 8;
+		s_pInstCache =
+			(EEINST*)malloc(sizeof(EEINST) * s_nInstCacheSize);
+
+		pxAssert(s_pInstCache);
+	}
+
+	EEINST* pcur = s_pInstCache + 1;
+	_recClearInst(pcur);
+	pcur->info = 0;
+
+	pcur[-1] = pcur[0];
+	recBackpropBSC(code, pcur - 1, pcur);
+
+	g_pCurInstInfo = s_pInstCache;
+
+	s_nEndBlock = startpc + 4;
+
+	s_tlbJitCompiling = true;
+	s_tlbJitCompileVPage = vpage;
+	s_tlbJitCompilePPage = ppage;
+
+	recompileNextInstruction(false, false);
+
+	s_tlbJitCompiling = false;
+
+	pxAssert(pc == startpc + 4);
+	pxAssert(g_branch == 0);
+
+	// End this one-instruction block through normal event/dispatch logic.
+	iFlushCall(FLUSH_EVERYTHING);
+	xMOV(ptr32[&cpuRegs.pc], pc);
+	iBranchTest(pc);
+
+	s_pCurBlockEx->size = 1;
+	s_pCurBlockEx->x86size =
+		static_cast<u32>(xGetPtr() - block_start);
+
+	s_pCurBlock->SetFnptr(reinterpret_cast<uptr>(block_start));
+
+	static u64 tlbCompileCount = 0;
+	const u64 id = ++tlbCompileCount;
+
+	if (id <= 64 || (id % 10000) == 0)
+	{
+		Console.Error(
+			"PSBBN TLBJITCOMPILE[%llu] vpc=%08X ppc=%08X code=%08X host=%p",
+			id,
+			startpc,
+			paddr,
+			code,
+			block_start);
+	}
+
+	recPtr = xGetPtr();
+
+	s_pCurBlock = nullptr;
+	s_pCurBlockEx = nullptr;
 }
 
 // Temporary PSBBN probe for EE recompiler dispatch into TLB-mapped userspace.
@@ -2024,9 +2253,9 @@ bool encodeMemcheck()
 
 void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 {
-	if (EmuConfig.EnablePatches)
+	if (EmuConfig.EnablePatches && !s_tlbJitCompiling)
 		Patch::ApplyDynamicPatches(pc);
-
+	
 	// add breakpoint
 	if (!delayslot)
 	{
@@ -2045,7 +2274,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		_clearNeededXMMregs();
 	}
 
-	s_pCode = (int*)PSM(pc);
+	s_pCode = tlbJitCodePtr(pc);
 	pxAssert(s_pCode);
 
 #if 0
