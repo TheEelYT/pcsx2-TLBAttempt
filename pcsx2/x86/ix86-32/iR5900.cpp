@@ -429,15 +429,37 @@ static const void* _DynGen_JITCompile()
 	return retval;
 }
 
+static u32 psbbnShouldInterpretKuseg()
+{
+	const u32 status = cpuRegs.CP0.n.Status.val;
+
+	// Effective User mode:
+	// EXL = 0, ERL = 0, KSU = 2.
+	return (cpuRegs.pc < 0x80000000u &&
+			(status & 0x06u) == 0 &&
+			(status & 0x18u) == 0x10u) ? 1u : 0u;
+}
+
 // called when jumping to variable pc address
 static const void* _DynGen_DispatcherReg()
 {
-	u8* retval = xGetPtr(); // fallthrough target, can't align it!
+	u8* retval = xGetPtr();
 
-	// C equivalent:
-	// u32 addr = cpuRegs.pc;
-	// void(**base)() = (void(**)())recLUT[addr >> 16];
-	// base[addr >> 2]();
+	// Temporary PS2 Linux/PSBBN correctness bridge:
+	// only divert actual User-mode KUSEG execution through the
+	// TLB-aware interpreter fallback.
+	xFastCall((const void*)psbbnShouldInterpretKuseg);
+	xTEST(eax, eax);
+	xForwardJZ32 normal_dispatch;
+
+	// recError(0) performs our guest TLB lookup. It either raises
+	// an instruction TLBL or executes one valid userspace instruction
+	// through intCpu.Step(). Both paths exit recompiled execution.
+	xFastCall((const void*)recError, 0);
+
+	normal_dispatch.SetTarget();
+
+	// Normal recompiler dispatch.
 	xMOV(eax, ptr[&cpuRegs.pc]);
 	xMOV(edx, eax);
 	xSHR(eax, 16);
@@ -536,13 +558,190 @@ static void _DynGen_Dispatchers()
 //////////////////////////////////////////////////////////////////////////////////////////
 //
 
+static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut)
+{
+	const u32 currentASID = cpuRegs.CP0.n.EntryHi & 0xff;
+
+	for (int t = 0; t < 48; t++)
+	{
+		const u32 pageSize = (tlb[t].Mask() + 1) << 12;
+		const u32 base = tlb[t].VPN2();
+
+		if (vaddr < base || vaddr >= base + pageSize * 2)
+			continue;
+
+		if (!tlb[t].isGlobal() && tlb[t].EntryHi.ASID != currentASID)
+			continue;
+
+		const bool odd = (vaddr - base) >= pageSize;
+		const EntryLo_t& lo = odd ? tlb[t].EntryLo1 : tlb[t].EntryLo0;
+
+		*validOut = lo.V;
+
+		if (lo.V)
+		{
+			const u32 pfn = odd ? tlb[t].PFN1() : tlb[t].PFN0();
+			*paddrOut = pfn + ((vaddr - base) & (pageSize - 1));
+		}
+		else
+		{
+			*paddrOut = 0;
+		}
+
+		return true;
+	}
+
+	*validOut = false;
+	*paddrOut = 0;
+	return false;
+}
+
+// Temporary PSBBN probe for EE recompiler dispatch into TLB-mapped userspace.
+static void psbbnProbeUnmappedRecLUT(u32 vpc)
+{
+	static int probeCount = 0;
+
+	if (probeCount >= 16)
+		return;
+
+	const int id = ++probeCount;
+	const u32 region = vpc & 0xFFFF0000u;
+	const u32 currentASID = cpuRegs.CP0.n.EntryHi & 0xff;
+
+	Console.Error(
+		"PSBBN RECLUT[%03d] pc=%08X region=%08X ASID=%02X",
+		id, vpc, region, currentASID);
+
+	for (u32 offset = 0; offset < 0x10000; offset += 0x1000)
+	{
+		const u32 vaddr = region + offset;
+
+		int foundSlot = -1;
+		bool valid = false;
+		bool dirty = false;
+		bool global = false;
+		u32 paddr = 0;
+
+		for (int t = 0; t < 48; t++)
+		{
+			const u32 pageSize = (tlb[t].Mask() + 1) << 12;
+			const u32 base = tlb[t].VPN2();
+
+			if (vaddr < base || vaddr >= base + pageSize * 2)
+				continue;
+
+			if (!tlb[t].isGlobal() && tlb[t].EntryHi.ASID != currentASID)
+				continue;
+
+			const bool odd = (vaddr - base) >= pageSize;
+			const EntryLo_t& lo = odd ? tlb[t].EntryLo1 : tlb[t].EntryLo0;
+
+			foundSlot = t;
+			valid = lo.V;
+			dirty = lo.D;
+			global = tlb[t].isGlobal();
+
+			if (valid)
+			{
+				const u32 pfn = odd ? tlb[t].PFN1() : tlb[t].PFN0();
+				paddr = pfn + ((vaddr - base) & (pageSize - 1));
+			}
+
+			break;
+		}
+
+		if (foundSlot >= 0)
+		{
+			Console.Error(
+				"PSBBN RECLUTPAGE[%03d] va=%08X slot=%02d "
+				"valid=%u dirty=%u global=%u pa=%08X",
+				id,
+				vaddr,
+				foundSlot,
+				valid ? 1u : 0u,
+				dirty ? 1u : 0u,
+				global ? 1u : 0u,
+				paddr);
+		}
+		else
+		{
+			Console.Error(
+				"PSBBN RECLUTPAGE[%03d] va=%08X slot=NONE",
+				id, vaddr);
+		}
+	}
+}
+
 static void recError(u32 error)
 {
 	switch (error)
 	{
 		case 0:
-			Host::ReportErrorAsync("R5900 Exception", fmt::format("Jump to unmapped recLUT page (PC: 0x{:08x})", cpuRegs.pc));
+		{
+			const u32 vpc = cpuRegs.pc;
+
+			static u64 psbbnRecFetchCount = 0;
+			const u64 psbbnFetchId = ++psbbnRecFetchCount;
+			const bool psbbnLogFetch =
+				(psbbnFetchId <= 256) || ((psbbnFetchId % 100000) == 0);
+
+			psbbnProbeUnmappedRecLUT(vpc);
+
+			bool valid = false;
+			u32 paddr = 0;
+			const bool matched = psbbnLookupTlb(vpc, &valid, &paddr);
+
+			if (psbbnLogFetch)
+			{
+				Console.Error(
+					"PSBBN RECFETCH[%llu] pc=%08X matched=%u valid=%u paddr=%08X",
+					psbbnFetchId,
+					vpc,
+					matched ? 1u : 0u,
+					valid ? 1u : 0u,
+					paddr);
+			}
+
+			// An unmapped/invalid KUSEG instruction fetch is a guest TLBL.
+			if (vpc < 0x80000000u && (!matched || !valid))
+			{
+				Console.Error(
+					"PSBBN RECFETCH raising instruction TLBL for %08X",
+					vpc);
+
+				// cpuTlbMissR() expects the PC to have been pre-incremented.
+				cpuRegs.pc = vpc + 4;
+				cpuTlbMissR(vpc, 0);
+
+				recExitExecution();
+				return;
+			}
+
+			// Temporary correctness bridge for valid TLB-mapped KUSEG code.
+			if (vpc < 0x80000000u && matched && valid)
+			{
+				if (psbbnLogFetch)
+				{
+					Console.Error(
+						"PSBBN RECFETCH[%llu] interpreter fallback pc=%08X paddr=%08X",
+						psbbnFetchId,
+						vpc,
+						paddr);
+				}
+
+				intCpu.Step();
+
+				recExitExecution();
+				return;
+			}
+
+			Host::ReportErrorAsync(
+				"R5900 Exception",
+				fmt::format(
+					"Jump to unmapped recLUT page (PC: 0x{:08x})",
+					vpc));
 			break;
+		}
 		case 1:
 			Host::ReportErrorAsync("R5900 Exception", fmt::format("Jump to unaligned address (PC: 0x{:08x})", cpuRegs.pc));
 			break;
@@ -619,7 +818,7 @@ static void recReserveRAM()
 		recLUT_SetPage(recLUT, hwLUT, recROM2, 0x0000, i, i - 0x1e40);
 		recLUT_SetPage(recLUT, hwLUT, recROM2, 0x8000, i, i - 0x1e40);
 		recLUT_SetPage(recLUT, hwLUT, recROM2, 0xa000, i, i - 0x1e40);
-	}
+	}	
 }
 
 static void recReserve()
@@ -744,9 +943,9 @@ static void recResetEE()
 	recResetRaw();
 }
 
-static void recCancelInstruction()
+static void recCancelInstruction() //Supposedly this should never be called
 {
-	pxFailRel("recCancelInstruction() called, this should never happen!");
+	recExitExecution();
 }
 
 static void recExecute()
@@ -1405,11 +1604,10 @@ static void iBranchTest(u32 newpc)
 		xMOV(ptr64[&cpuRegs.cycle], rax); // update cycles
 		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
 
-		if (newpc == 0xffffffff)
+		if (newpc == 0xffffffff || newpc < 0x80000000u)
 			xJS(DispatcherReg);
 		else
 			recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
-
 		xJMP((void*)DispatcherEvent);
 	}
 }

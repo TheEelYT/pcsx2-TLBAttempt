@@ -1153,7 +1153,8 @@ void memReset()
 	// whatever physical memory sits there rather than faulting the page in.
 	//
 	// Opt-in, since the identity map is long-standing behaviour for game titles.
-	if (std::getenv("PCSX2_STRICT_USEG"))
+	//if (std::getenv("PCSX2_STRICT_USEG"))
+	if (true) // Temporary PSBBN/Linux correctness test
 	{
 		Console.WriteLn("memReset: strict user segment, 0-2GB faults unless the guest TLB maps it");
 		vtlb_VMapUnmap(0x00000000, 0x80000000);

@@ -19,6 +19,11 @@ static int RETURN_READ_IN_RAX()
 namespace R5900::Dynarec::OpcodeImpl
 {
 
+// Temporary PS2 Linux/PSBBN correctness path:
+// keep the EE recompiler for normal instructions, but execute memory
+// instructions through the interpreter fallback so guest TLB exceptions
+// are raised with fully-flushed CPU state.
+#undef LOADSTORE_RECOMPILE
 /*********************************************************
 * Load and store for GPR                                 *
 * Format:  OP rt, offset(base)                           *

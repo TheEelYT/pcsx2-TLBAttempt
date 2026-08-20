@@ -122,6 +122,10 @@ void recDI()
 	inUserMode.SetTarget();
 }
 
+// Temporary PS2 Linux/PSBBN correctness path:
+// use the interpreter COP0 handlers so EntryHi/ASID changes
+// run the full TLB address-space switching logic.
+#undef CP0_RECOMPILE
 
 #ifndef CP0_RECOMPILE
 
