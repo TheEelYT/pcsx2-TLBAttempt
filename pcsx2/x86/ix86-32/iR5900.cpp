@@ -125,6 +125,14 @@ static __fi int* tlbJitCodePtr(u32 vaddr)
 	return (int*)PSM(addr);
 }
 
+static __fi u32 tlbJitReadCode(u32 vaddr, u32 vpage, u32 ppage)
+{
+	pxAssert((vaddr & ~0xFFFu) == vpage);
+
+	const u32 paddr = ppage | (vaddr & 0xFFFu);
+	return *(u32*)PSM(paddr);
+}
+
 static u8* recPtrEnd = nullptr;
 EEINST* s_pInstCache = nullptr;
 static u32 s_nInstCacheSize = 0;
@@ -430,7 +438,7 @@ static void dyna_page_reset(u32 start, u32 sz);
 static void recError(u32 error);
 static uptr psbbnGetTlbJitTarget();
 static void psbbnTlbJitFallback();
-static void psbbnRecompileTlbOne();
+static void psbbnRecompileTlbBlock();
 
 static const void* DispatcherEvent = nullptr;
 static const void* DispatcherReg = nullptr;
@@ -479,7 +487,7 @@ static const void* _DynGen_TlbJITCompile()
 {
 	u8* retval = xGetAlignedCallTarget();
 
-	xFastCall((const void*)psbbnRecompileTlbOne);
+	xFastCall((const void*)psbbnRecompileTlbBlock);
 
 	// If compilation succeeded, DispatcherReg will now find the newly
 	// generated native target in this page/slot.
@@ -543,8 +551,8 @@ static bool tlbJitCanCompileOne(u32 code)
 				case 50: // TLT
 				case 52: // TLTU
 				case 54: // TEQ
+				case 55: // TNE
 					return false;
-
 				default:
 					return true;
 			}
@@ -818,7 +826,7 @@ static uptr psbbnGetTlbJitTarget()
 	return page.blocks[slot].GetFnptr();
 }
 
-static void psbbnRecompileTlbOne()
+static void psbbnRecompileTlbBlock()
 {
 	const u32 startpc = cpuRegs.pc;
 
@@ -838,6 +846,7 @@ static void psbbnRecompileTlbOne()
 
 	const u32 vpage = startpc & ~0xFFFu;
 	const u32 ppage = paddr & ~0xFFFu;
+	const u32 page_end = vpage + 0x1000u;
 	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xFF;
 
 	const u64 page_key =
@@ -858,10 +867,30 @@ static void psbbnRecompileTlbOne()
 	}
 
 	const u32 slot = (startpc & 0xFFFu) >> 2;
-	const u32 code = *(u32*)PSM(paddr);
 
-	// Anything tricky stays on our known-good interpreter bridge.
-	if (!tlbJitCanCompileOne(code))
+	// Build a conservative straight-line block.
+	//
+	// Stop before control flow, traps, coprocessor operations, or the
+	// next TLB page. Those continue through the interpreter bridge for now.
+	static constexpr u32 MAX_TLB_BLOCK_INSTRUCTIONS = 64;
+
+	u32 endpc = startpc;
+	u32 instruction_count = 0;
+
+	while (endpc < page_end &&
+		   instruction_count < MAX_TLB_BLOCK_INSTRUCTIONS)
+	{
+		const u32 code = tlbJitReadCode(endpc, vpage, ppage);
+
+		if (!tlbJitCanCompileOne(code))
+			break;
+
+		endpc += 4;
+		instruction_count++;
+	}
+
+	// First instruction itself is something we don't trust natively yet.
+	if (instruction_count == 0)
 	{
 		intCpu.Step();
 		recExitExecution();
@@ -884,7 +913,8 @@ static void psbbnRecompileTlbOne()
 
 	*s_pCurBlockEx = {};
 	s_pCurBlockEx->startpc = startpc;
-	s_pCurBlockEx->fnptr = reinterpret_cast<uptr>(block_start);
+	s_pCurBlockEx->fnptr =
+		reinterpret_cast<uptr>(block_start);
 
 	s_nBlockCycles = 0;
 	s_nBlockInterlocked = false;
@@ -899,61 +929,87 @@ static void psbbnRecompileTlbOne()
 	_initX86regs();
 	_initXMMregs();
 
-	// Minimal one-instruction register analysis.
-	if (s_nInstCacheSize < 2)
+	// Build the normal backwards register-analysis information for
+	// every instruction in this straight-line block.
+	const u32 needed_entries = instruction_count + 1;
+
+	if (s_nInstCacheSize < needed_entries)
 	{
 		free(s_pInstCache);
-		s_nInstCacheSize = 8;
+
+		s_nInstCacheSize = needed_entries + 8;
 		s_pInstCache =
 			(EEINST*)malloc(sizeof(EEINST) * s_nInstCacheSize);
 
 		pxAssert(s_pInstCache);
 	}
 
-	EEINST* pcur = s_pInstCache + 1;
+	EEINST* pcur = s_pInstCache + instruction_count;
+
 	_recClearInst(pcur);
 	pcur->info = 0;
 
-	pcur[-1] = pcur[0];
-	recBackpropBSC(code, pcur - 1, pcur);
+	for (u32 vaddr = endpc; vaddr > startpc; vaddr -= 4)
+	{
+		const u32 code =
+			tlbJitReadCode(vaddr - 4, vpage, ppage);
+
+		pcur[-1] = pcur[0];
+
+		recBackpropBSC(
+			code,
+			pcur - 1,
+			pcur);
+
+		pcur--;
+	}
 
 	g_pCurInstInfo = s_pInstCache;
-
-	s_nEndBlock = startpc + 4;
+	s_nEndBlock = endpc;
 
 	s_tlbJitCompiling = true;
 	s_tlbJitCompileVPage = vpage;
 	s_tlbJitCompilePPage = ppage;
 
-	recompileNextInstruction(false, false);
+	while (!g_branch && pc < s_nEndBlock)
+		recompileNextInstruction(false, false);
 
 	s_tlbJitCompiling = false;
 
-	pxAssert(pc == startpc + 4);
+	// Everything admitted by tlbJitCanCompileOne() should be
+	// straight-line. If this fires, our filter missed something.
 	pxAssert(g_branch == 0);
+	pxAssert(pc == endpc);
 
-	// End this one-instruction block through normal event/dispatch logic.
+	s_pCurBlockEx->size = instruction_count;
+
+	// Finish through the regular scheduler/dispatcher.
+	//
+	// Because the next architectural PC is KUSEG, our modified
+	// iBranchTest() routes it back through DispatcherReg rather
+	// than hard-linking through the normal 64K recLUT.
 	iFlushCall(FLUSH_EVERYTHING);
-	xMOV(ptr32[&cpuRegs.pc], pc);
-	iBranchTest(pc);
+	xMOV(ptr32[&cpuRegs.pc], endpc);
+	iBranchTest(endpc);
 
-	s_pCurBlockEx->size = 1;
 	s_pCurBlockEx->x86size =
 		static_cast<u32>(xGetPtr() - block_start);
 
-	s_pCurBlock->SetFnptr(reinterpret_cast<uptr>(block_start));
+	s_pCurBlock->SetFnptr(
+		reinterpret_cast<uptr>(block_start));
 
-	static u64 tlbCompileCount = 0;
-	const u64 id = ++tlbCompileCount;
+	static u64 tlbBlockCompileCount = 0;
+	const u64 id = ++tlbBlockCompileCount;
 
-	if (id <= 64 || (id % 10000) == 0)
+	if (id <= 100 || (id % 5000) == 0)
 	{
 		Console.Error(
-			"PSBBN TLBJITCOMPILE[%llu] vpc=%08X ppc=%08X code=%08X host=%p",
+			"PSBBN TLBJITBLOCK[%llu] vpc=%08X ppc=%08X insts=%u end=%08X host=%p",
 			id,
 			startpc,
 			paddr,
-			code,
+			instruction_count,
+			endpc,
 			block_start);
 	}
 
