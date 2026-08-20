@@ -429,15 +429,27 @@ static const void* _DynGen_JITCompile()
 	return retval;
 }
 
+static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut);
+
 static u32 psbbnShouldInterpretKuseg()
 {
-	const u32 status = cpuRegs.CP0.n.Status.val;
+	const u32 vpc = cpuRegs.pc;
 
-	// Effective User mode:
-	// EXL = 0, ERL = 0, KSU = 2.
-	return (cpuRegs.pc < 0x80000000u &&
-			(status & 0x06u) == 0 &&
-			(status & 0x18u) == 0x10u) ? 1u : 0u;
+	if (vpc >= 0x80000000u)
+		return 0;
+
+	bool valid = false;
+	u32 paddr = 0;
+	const bool matched = psbbnLookupTlb(vpc, &valid, &paddr);
+
+	// If the guest TLB has a valid identity mapping, normal recLUT
+	// dispatch already points at the correct physical backing.
+	if (matched && valid && paddr == vpc)
+		return 0;
+
+	// Missing/invalid mappings need an instruction TLBL.
+	// Non-identity mappings need the temporary TLB-aware fallback.
+	return 1;
 }
 
 // called when jumping to variable pc address
