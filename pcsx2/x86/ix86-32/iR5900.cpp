@@ -425,7 +425,29 @@ void recBranchCall(void (*func)())
 void recCall(void (*func)())
 {
 	iFlushCall(FLUSH_INTERPRETER);
-	xFastCall((void*)func);
+
+	// Temporary TLB-JIT correctness bridge for interpreter-backed
+	// instructions in a branch delay slot.
+	//
+	// cpuTlbMiss() expects the interpreter PC to have already advanced
+	// past the faulting instruction. For a delay-slot fault we also need
+	// cpuRegs.branch=1 so cpuException() sets EPC to the branch and BD=1.
+	if (s_tlbJitCompiling && g_recompilingDelaySlot)
+	{
+		xMOV(ptr32[&cpuRegs.pc], pc + 4);
+		xMOV(ptr32[&cpuRegs.branch], 1);
+
+		xFastCall((void*)func);
+
+		// Normal return: we're no longer executing the runtime delay slot.
+		// If func raised an exception, cpuException() already cleared this
+		// before recExitExecution() left the JIT.
+		xMOV(ptr32[&cpuRegs.branch], 0);
+	}
+	else
+	{
+		xFastCall((void*)func);
+	}
 }
 
 // =====================================================================================================
@@ -646,51 +668,15 @@ static bool tlbJitIsNativeBranch(u32 code)
 
 static bool tlbJitCanCompileDelaySlot(u32 code)
 {
+	// Keep branches-in-delay-slots and instructions which our prototype
+	// doesn't yet trust out of the native TLB path.
 	if (!tlbJitCanCompileOne(code))
 		return false;
 
 	if (tlbJitIsNativeBranch(code))
 		return false;
 
-	switch (code >> 26)
-	{
-		// Memory operations. Keep these interpreted in delay slots
-		// until TLB exception/BD handling is fully native.
-		case 26: // LDL
-		case 27: // LDR
-		case 30: // LQ
-		case 31: // SQ
-		case 32: // LB
-		case 33: // LH
-		case 34: // LWL
-		case 35: // LW
-		case 36: // LBU
-		case 37: // LHU
-		case 38: // LWR
-		case 39: // LWU
-		case 40: // SB
-		case 41: // SH
-		case 42: // SWL
-		case 43: // SW
-		case 44: // SDL
-		case 45: // SDR
-		case 46: // SWR
-		case 47: // CACHE
-		case 48: // LL
-		case 49: // LWC1
-		case 50: // LWC2
-		case 51: // PREF
-		case 54: // LQC2
-		case 55: // LD
-		case 56: // SC
-		case 57: // SWC1
-		case 62: // SQC2
-		case 63: // SD
-			return false;
-
-		default:
-			return true;
-	}
+	return true;
 }
 
 // called when jumping to variable pc address
