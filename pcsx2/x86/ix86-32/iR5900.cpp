@@ -25,6 +25,10 @@
 // Only for MOVQ workaround.
 #include "common/emitter/internal.h"
 
+#include <array>
+#include <memory>
+#include <unordered_map>
+
 //#define DUMP_BLOCKS 1
 //#define TRACE_BLOCKS 1
 
@@ -83,6 +87,26 @@ static BASEBLOCK* recROM2 = nullptr; // also here
 
 static BaseBlocks recBlocks;
 static u8* recPtr = nullptr;
+
+// Temporary TLB-aware EE JIT page cache.
+//
+// The normal recLUT works at 64K granularity, which is too coarse for
+// guest TLB mappings. These pages are keyed by 4K virtual page instead.
+//
+// For now the block slots still point to an interpreter fallback thunk.
+// Once dispatch/cache correctness is proven, we'll teach these slots to
+// contain real recompiled blocks.
+struct TlbJitPage
+{
+	u32 virtual_page = 0;
+	u32 physical_page = 0;
+
+	std::array<BASEBLOCK, 0x400> blocks{};
+	std::array<BASEBLOCKEX, 0x400> block_ex{};
+};
+
+static std::unordered_map<u32, std::unique_ptr<TlbJitPage>> s_tlbJitPages;
+
 static u8* recPtrEnd = nullptr;
 EEINST* s_pInstCache = nullptr;
 static u32 s_nInstCacheSize = 0;
@@ -386,10 +410,13 @@ static void recRecompile(const u32 startpc);
 static void dyna_block_discard(u32 start, u32 sz);
 static void dyna_page_reset(u32 start, u32 sz);
 static void recError(u32 error);
+static uptr psbbnGetTlbJitTarget();
+static void psbbnTlbJitFallback();
 
 static const void* DispatcherEvent = nullptr;
 static const void* DispatcherReg = nullptr;
 static const void* JITCompile = nullptr;
+static const void* TlbJITCompile = nullptr;
 static const void* EnterRecompiledCode = nullptr;
 static const void* DispatchBlockDiscard = nullptr;
 static const void* DispatchPageReset = nullptr;
@@ -429,6 +456,28 @@ static const void* _DynGen_JITCompile()
 	return retval;
 }
 
+static const void* _DynGen_TlbJITCompile()
+{
+	u8* retval = xGetAlignedCallTarget();
+
+	// Phase 1 only:
+	// prove the sparse 4K dispatch/cache plumbing before replacing
+	// this with the real TLB-aware native compiler.
+	xFastCall((const void*)psbbnTlbJitFallback);
+
+	// psbbnTlbJitFallback currently exits recompiled execution, but
+	// keep a safe continuation here in case that changes later.
+	xJMP(DispatcherReg);
+
+	return retval;
+}
+
+static void psbbnTlbJitFallback()
+{
+	intCpu.Step();
+	recExitExecution();
+}
+
 static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut);
 
 static u32 psbbnShouldInterpretKuseg()
@@ -457,21 +506,21 @@ static const void* _DynGen_DispatcherReg()
 {
 	u8* retval = xGetPtr();
 
-	// Temporary PS2 Linux/PSBBN correctness bridge:
-	// only divert actual User-mode KUSEG execution through the
-	// TLB-aware interpreter fallback.
-	xFastCall((const void*)psbbnShouldInterpretKuseg);
-	xTEST(eax, eax);
+	// Ask the 4K TLB-JIT dispatcher whether this PC needs a
+	// TLB-aware block.
+	//
+	// Return value:
+	//   0     = use the normal recLUT dispatcher
+	//   other = native host target for this TLB-mapped instruction
+	xFastCall((const void*)psbbnGetTlbJitTarget);
+
+	xTEST(rax, rax);
 	xForwardJZ32 normal_dispatch;
 
-	// recError(0) performs our guest TLB lookup. It either raises
-	// an instruction TLBL or executes one valid userspace instruction
-	// through intCpu.Step(). Both paths exit recompiled execution.
-	xFastCall((const void*)recError, 0);
+	xJMP(rax);
 
 	normal_dispatch.SetTarget();
 
-	// Normal recompiler dispatch.
 	xMOV(eax, ptr[&cpuRegs.pc]);
 	xMOV(edx, eax);
 	xSHR(eax, 16);
@@ -556,6 +605,7 @@ static void _DynGen_Dispatchers()
 	DispatcherReg = _DynGen_DispatcherReg();
 
 	JITCompile = _DynGen_JITCompile();
+	TlbJITCompile = _DynGen_TlbJITCompile();
 	EnterRecompiledCode = _DynGen_EnterRecompiledCode();
 	DispatchBlockDiscard = _DynGen_DispatchBlockDiscard();
 	DispatchPageReset = _DynGen_DispatchPageReset();
@@ -606,6 +656,76 @@ static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut)
 	*validOut = false;
 	*paddrOut = 0;
 	return false;
+}
+
+static uptr psbbnGetTlbJitTarget()
+{
+	const u32 vpc = cpuRegs.pc;
+
+	// KSEG and friends keep using normal recLUT dispatch.
+	if (vpc >= 0x80000000u)
+		return 0;
+
+	bool valid = false;
+	u32 paddr = 0;
+	const bool matched = psbbnLookupTlb(vpc, &valid, &paddr);
+
+	// No matching/valid mapping: this is an instruction-fetch TLBL.
+	if (!matched || !valid)
+	{
+		cpuRegs.pc = vpc + 4;
+		cpuTlbMissR(vpc, 0);
+		recExitExecution();
+	}
+
+	// Identity mapping already works through the normal recLUT.
+	if (paddr == vpc)
+		return 0;
+
+	// A branch/jump in the final instruction of a 4K page may execute
+	// its delay slot from the next TLB page. Keep that edge case on
+	// the interpreter until the native compiler can handle it.
+	if ((vpc & 0xFFFu) == 0xFFCu)
+	{
+		intCpu.Step();
+		recExitExecution();
+	}
+
+	const u32 vpage = vpc & ~0xFFFu;
+	const u32 ppage = paddr & ~0xFFFu;
+	const u32 page_index = vpage >> 12;
+
+	auto it = s_tlbJitPages.find(page_index);
+
+	// New page, or the guest remapped this virtual page to different
+	// physical backing.
+	if (it == s_tlbJitPages.end() ||
+		it->second->virtual_page != vpage ||
+		it->second->physical_page != ppage)
+	{
+		auto page = std::make_unique<TlbJitPage>();
+
+		page->virtual_page = vpage;
+		page->physical_page = ppage;
+
+		for (BASEBLOCK& block : page->blocks)
+			block.SetFnptr(reinterpret_cast<uptr>(TlbJITCompile));
+
+		Console.Error(
+			"PSBBN TLBJITPAGE vpage=%08X ppage=%08X ASID=%02X",
+			vpage,
+			ppage,
+			cpuRegs.CP0.n.EntryHi & 0xFF);
+
+		it = s_tlbJitPages.insert_or_assign(
+			page_index,
+			std::move(page)).first;
+	}
+
+	TlbJitPage& page = *it->second;
+	const u32 slot = (vpc & 0xFFFu) >> 2;
+
+	return page.blocks[slot].GetFnptr();
 }
 
 // Temporary PSBBN probe for EE recompiler dispatch into TLB-mapped userspace.
@@ -882,6 +1002,7 @@ static void recResetRaw()
 		memset(s_pInstCache, 0, sizeof(EEINST) * s_nInstCacheSize);
 
 	recBlocks.Reset();
+	s_tlbJitPages.clear();
 	vtlb_ClearLoadStoreInfo();
 
 	g_branch = 0;
