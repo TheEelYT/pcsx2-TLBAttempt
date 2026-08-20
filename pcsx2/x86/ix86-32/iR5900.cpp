@@ -594,6 +594,105 @@ static bool tlbJitCanCompileOne(u32 code)
 	}
 }
 
+static bool tlbJitIsNativeBranch(u32 code)
+{
+	const u32 op = code >> 26;
+
+	switch (op)
+	{
+		case 0: // SPECIAL
+		{
+			const u32 funct = code & 0x3F;
+			return funct == 8 || funct == 9; // JR / JALR
+		}
+
+		case 1: // REGIMM
+		{
+			const u32 rt = (code >> 16) & 0x1F;
+
+			switch (rt)
+			{
+				case 0:  // BLTZ
+				case 1:  // BGEZ
+				case 2:  // BLTZL
+				case 3:  // BGEZL
+				case 16: // BLTZAL
+				case 17: // BGEZAL
+				case 18: // BLTZALL
+				case 19: // BGEZALL
+					return true;
+
+				default:
+					return false;
+			}
+		}
+
+		case 2:  // J
+		case 3:  // JAL
+		case 4:  // BEQ
+		case 5:  // BNE
+		case 6:  // BLEZ
+		case 7:  // BGTZ
+		case 20: // BEQL
+		case 21: // BNEL
+		case 22: // BLEZL
+		case 23: // BGTZL
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+static bool tlbJitCanCompileDelaySlot(u32 code)
+{
+	if (!tlbJitCanCompileOne(code))
+		return false;
+
+	if (tlbJitIsNativeBranch(code))
+		return false;
+
+	switch (code >> 26)
+	{
+		// Memory operations. Keep these interpreted in delay slots
+		// until TLB exception/BD handling is fully native.
+		case 26: // LDL
+		case 27: // LDR
+		case 30: // LQ
+		case 31: // SQ
+		case 32: // LB
+		case 33: // LH
+		case 34: // LWL
+		case 35: // LW
+		case 36: // LBU
+		case 37: // LHU
+		case 38: // LWR
+		case 39: // LWU
+		case 40: // SB
+		case 41: // SH
+		case 42: // SWL
+		case 43: // SW
+		case 44: // SDL
+		case 45: // SDR
+		case 46: // SWR
+		case 47: // CACHE
+		case 48: // LL
+		case 49: // LWC1
+		case 50: // LWC2
+		case 51: // PREF
+		case 54: // LQC2
+		case 55: // LD
+		case 56: // SC
+		case 57: // SWC1
+		case 62: // SQC2
+		case 63: // SD
+			return false;
+
+		default:
+			return true;
+	}
+}
+
 // called when jumping to variable pc address
 static const void* _DynGen_DispatcherReg()
 {
@@ -755,6 +854,18 @@ static uptr psbbnGetTlbJitTarget()
 {
 	const u32 vpc = cpuRegs.pc;
 
+	static u64 tlbDispatchCount = 0;
+	const u64 dispatchId = ++tlbDispatchCount;
+	
+	if ((dispatchId % 1000000) == 0)
+	{
+		Console.Error(
+			"PSBBN TLBJITDISPATCH[%llu] pc=%08X ASID=%02X",
+			dispatchId,
+			vpc,
+			cpuRegs.CP0.n.EntryHi & 0xFF);
+	}
+
 	// KSEG and friends keep using normal recLUT dispatch.
 	if (vpc >= 0x80000000u)
 		return 0;
@@ -876,11 +987,51 @@ static void psbbnRecompileTlbBlock()
 
 	u32 endpc = startpc;
 	u32 instruction_count = 0;
+	bool has_native_branch = false;
 
 	while (endpc < page_end &&
 		   instruction_count < MAX_TLB_BLOCK_INSTRUCTIONS)
 	{
-		const u32 code = tlbJitReadCode(endpc, vpage, ppage);
+		const u32 code =
+			tlbJitReadCode(endpc, vpage, ppage);
+
+		if (tlbJitIsNativeBranch(code))
+		{
+			// We need the branch and its delay slot to reside in this
+			// same translated 4K page.
+			if (endpc + 8 > page_end)
+				break;
+
+			const u32 delay_code =
+				tlbJitReadCode(endpc + 4, vpage, ppage);
+
+			// Keep tricky/faulting delay slots on the interpreter path
+			// during this first native-branch phase.
+			if (!tlbJitCanCompileDelaySlot(delay_code))
+			{
+				static u64 branchDelayFallbackCount = 0;
+				const u64 id = ++branchDelayFallbackCount;
+
+				if (id <= 100 || (id % 100000) == 0)
+				{
+					Console.Error(
+						"PSBBN TLBJITBRANCHFALLBACK[%llu] "
+						"vpc=%08X branch=%08X delay=%08X delayop=%02X",
+						id,
+						endpc,
+						code,
+						delay_code,
+						delay_code >> 26);
+				}
+
+				break;
+			}
+			
+			endpc += 8;
+			instruction_count += 2;
+			has_native_branch = true;
+			break;
+		}
 
 		if (!tlbJitCanCompileOne(code))
 			break;
@@ -892,10 +1043,27 @@ static void psbbnRecompileTlbBlock()
 	// First instruction itself is something we don't trust natively yet.
 	if (instruction_count == 0)
 	{
+		static u64 tlbFallbackCount = 0;
+		const u64 id = ++tlbFallbackCount;
+
+		const u32 code =
+			tlbJitReadCode(startpc, vpage, ppage);
+
+		if (id <= 100 || (id % 100000) == 0)
+		{
+			Console.Error(
+				"PSBBN TLBJITFALLBACK[%llu] vpc=%08X ppc=%08X code=%08X op=%02X",
+				id,
+				startpc,
+				paddr,
+				code,
+				code >> 26);
+		}
+
 		intCpu.Step();
 		recExitExecution();
 	}
-
+	
 	if (recPtr >= recPtrEnd)
 	{
 		eeRecNeedsReset = true;
@@ -976,22 +1144,31 @@ static void psbbnRecompileTlbBlock()
 
 	s_tlbJitCompiling = false;
 
-	// Everything admitted by tlbJitCanCompileOne() should be
-	// straight-line. If this fires, our filter missed something.
-	pxAssert(g_branch == 0);
-	pxAssert(pc == endpc);
+	if (has_native_branch)
+	{
+		pxAssert(g_branch != 0);
 
-	s_pCurBlockEx->size = instruction_count;
+		// Normal branches compile their delay slot and finish at endpc.
+		// A branch-likely whose condition is known false can annul the
+		// delay slot, in which case the compile-time PC stops one
+		// instruction earlier.
+		pxAssert(pc == endpc || pc + 4 == endpc);
+	}
+	else
+	{
+		pxAssert(g_branch == 0);
+		pxAssert(pc == endpc);
 
-	// Finish through the regular scheduler/dispatcher.
-	//
-	// Because the next architectural PC is KUSEG, our modified
-	// iBranchTest() routes it back through DispatcherReg rather
-	// than hard-linking through the normal 64K recLUT.
-	iFlushCall(FLUSH_EVERYTHING);
-	xMOV(ptr32[&cpuRegs.pc], endpc);
-	iBranchTest(endpc);
+		iFlushCall(FLUSH_EVERYTHING);
+		xMOV(ptr32[&cpuRegs.pc], endpc);
+		iBranchTest(endpc);
+	}
 
+	// Use the amount of guest code the branch compiler actually consumed.
+	// This matters for branch-likely instructions whose delay slot was
+	// annulled at compile time.
+	s_pCurBlockEx->size = (pc - startpc) >> 2;	
+	
 	s_pCurBlockEx->x86size =
 		static_cast<u32>(xGetPtr() - block_start);
 
@@ -1561,6 +1738,9 @@ u8* recEndThunk()
 bool TrySwapDelaySlot(u32 rs, u32 rt, u32 rd, bool allow_loadstore)
 {
 #if 1
+	if (s_tlbJitCompiling)
+		return false;
+	
 	if (g_recompilingDelaySlot)
 		return false;
 
