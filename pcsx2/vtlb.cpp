@@ -516,11 +516,98 @@ void GoemonUnloadTlb(u32 key)
 	}
 }
 
+static __ri void vtlb_AddressError(u32 addr, bool store)
+{
+	Console.Error(fmt::format(
+		"Address Error, addr=0x{:x} [{}] pc=0x{:x}",
+		addr,
+		store ? "store" : "load",
+		cpuRegs.pc));
+
+	cpuRegs.CP0.n.BadVAddr = addr;
+
+	// Memory helpers see the interpreter-style preincremented PC,
+	// same convention as cpuTlbMiss().
+	cpuRegs.pc -= 4;
+
+	cpuException(
+		store ? EXC_CODE_AdES : EXC_CODE_AdEL,
+		cpuRegs.branch);
+
+	Cpu->CancelInstruction();
+}
+
 // Generates a tlbMiss Exception
 static __ri void vtlb_Miss(u32 addr, u32 mode)
 {
 	if (EmuConfig.Gamefixes.GoemonTlbHack)
 		GoemonTlbMissDebug();
+
+	static u64 psbbnLiveMissCount = 0;
+
+	const auto& psbbnStatus = cpuRegs.CP0.n.Status.b;
+
+	const bool psbbnUserMode =
+		!psbbnStatus.EXL &&
+		!psbbnStatus.ERL &&
+		psbbnStatus.KSU == 2;
+
+	const bool psbbnSuspiciousAddr =
+		addr < 0x00010000u ||
+		addr >= 0x80000000u;
+
+	if (psbbnUserMode &&
+		psbbnSuspiciousAddr &&
+		psbbnLiveMissCount < 100)
+	{
+		const u64 id = ++psbbnLiveMissCount;
+
+		const u32 code = cpuRegs.code;
+		const u32 rs = (code >> 21) & 0x1f;
+		const u32 rt = (code >> 16) & 0x1f;
+		const s32 imm = static_cast<s16>(code & 0xffff);
+
+		const u32 rsval = cpuRegs.GPR.r[rs].UL[0];
+		const u32 rtval = cpuRegs.GPR.r[rt].UL[0];
+
+		const u32 eff =
+			rsval + static_cast<u32>(imm);
+
+		Console.Error(
+			"PSBBN VTLBLIVE[%llu] "
+			"faultpc=%08X code=%08X addr=%08X mode=%s "
+			"rs=%u rsval=%08X rt=%u rtval=%08X "
+			"imm=%d eff=%08X branch=%u ASID=%02X",
+			id,
+			cpuRegs.pc - 4,
+			code,
+			addr,
+			mode ? "STORE" : "LOAD",
+			rs,
+			rsval,
+			rt,
+			rtval,
+			imm,
+			eff,
+			cpuRegs.branch,
+			cpuRegs.CP0.n.EntryHi & 0xff);
+	}
+
+	const auto& status = cpuRegs.CP0.n.Status.b;
+
+	const bool user_mode =
+		!status.EXL &&
+		!status.ERL &&
+		status.KSU == 2;
+
+	// User mode may only access KUSEG (0x00000000-0x7fffffff).
+	// Accessing kernel/supervisor segments is an Address Error,
+	// not a TLB miss.
+	if (user_mode && addr >= 0x80000000u)
+	{
+		vtlb_AddressError(addr, mode != 0);
+		return;
+	}
 
 	if (mode)
 		cpuTlbMissW(addr, cpuRegs.branch);

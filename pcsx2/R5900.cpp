@@ -240,11 +240,23 @@ void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 			psbbnIncomingEntryHi);
 	}
 
-	// Avoid too much spamming on the interpreter
-	if (Cpu != &intCpu || IsDebugBuild) {
-		Console.Error("cpuTlbMiss pc:%x, cycl:%llx, addr: %x, status=%x, code=%x",
-				cpuRegs.pc, cpuRegs.cycle, addr, cpuRegs.CP0.n.Status.val, excode);
-	}
+	static u64 psbbnTlbMissCount = 0;
+	const u64 psbbnMissId = ++psbbnTlbMissCount;
+
+	if ((Cpu != &intCpu || IsDebugBuild) &&
+		(psbbnMissId <= 200 || (psbbnMissId % 10000) == 0))
+	{
+		Console.Error(
+			"cpuTlbMiss[%llu] pc:%x, cycl:%llx, addr:%x, "
+			"status=%x, code=%x, ASID=%02X",
+			psbbnMissId,
+			cpuRegs.pc,
+			cpuRegs.cycle,
+			addr,
+			cpuRegs.CP0.n.Status.val,
+			excode,
+			psbbnIncomingAsid);
+	}	
 
 	cpuRegs.CP0.n.BadVAddr = addr;
 	cpuRegs.CP0.n.Context &= 0xFF80000F;

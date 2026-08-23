@@ -28,6 +28,8 @@
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <cstdio>
+#include <cstring>
 
 //#define DUMP_BLOCKS 1
 //#define TRACE_BLOCKS 1
@@ -617,9 +619,18 @@ static bool tlbJitCanCompileOne(u32 code)
 }
 
 static bool tlbJitIsNativeBranch(u32 code)
-{
+	{
 	const u32 op = code >> 26;
 
+	// Temporary A/B test: don't natively compile JR/JALR in sparse TLB JIT.
+	if (op == 0x00)
+	{
+		const u32 funct = code & 0x3f;
+
+		if (funct == 0x08) // JR only
+			return false;			
+	}
+	
 	switch (op)
 	{
 		case 0: // SPECIAL
@@ -836,9 +847,242 @@ static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut)
 	return false;
 }
 
+static bool psbbnReadGuestByte(u32 vaddr, u8* out)
+{
+	u32 paddr = 0;
+
+	// KSEG0/KSEG1 are direct mapped.
+	if (vaddr >= 0x80000000u && vaddr < 0xC0000000u)
+	{
+		paddr = vaddr & 0x1FFFFFFFu;
+	}
+	else
+	{
+		bool valid = false;
+
+		if (!psbbnLookupTlb(vaddr, &valid, &paddr) || !valid)
+			return false;
+	}
+
+	const u8* p =
+		static_cast<const u8*>(PSM(paddr));
+
+	if (!p)
+		return false;
+
+	*out = *p;
+	return true;
+}
+
+static bool psbbnReadGuestU32(u32 vaddr, u32* out)
+{
+	u8 b[4];
+
+	for (int i = 0; i < 4; i++)
+	{
+		if (!psbbnReadGuestByte(vaddr + i, &b[i]))
+			return false;
+	}
+
+	*out =
+		static_cast<u32>(b[0]) |
+		(static_cast<u32>(b[1]) << 8) |
+		(static_cast<u32>(b[2]) << 16) |
+		(static_cast<u32>(b[3]) << 24);
+
+	return true;
+}
+
+static bool psbbnReadGuestString(
+	u32 vaddr,
+	char* out,
+	size_t out_size)
+{
+	if (out_size == 0)
+		return false;
+
+	for (size_t i = 0; i + 1 < out_size; i++)
+	{
+		u8 c = 0;
+
+		if (!psbbnReadGuestByte(
+				vaddr + static_cast<u32>(i), &c))
+		{
+			out[i] = '\0';
+			return false;
+		}
+
+		if (c == 0)
+		{
+			out[i] = '\0';
+			return true;
+		}
+
+		out[i] =
+			(c >= 0x20 && c <= 0x7E)
+				? static_cast<char>(c)
+				: '?';
+	}
+
+	out[out_size - 1] = '\0';
+	return true;
+}
+
+static void psbbnReadKernelString(u32 addr, char* out, size_t out_size)
+{
+	if (out_size == 0)
+		return;
+
+	size_t i = 0;
+
+	for (; i + 1 < out_size; i++)
+	{
+		const u8* p =
+			static_cast<const u8*>(PSM(addr + static_cast<u32>(i)));
+
+		if (!p)
+		{
+			std::snprintf(
+				out,
+				out_size,
+				"<unreadable:%08X>",
+				addr);
+			return;
+		}
+
+		const char c = static_cast<char>(*p);
+
+		if (c == '\0')
+		{
+			out[i] = '\0';
+			return;
+		}
+
+		// Keep the log sane even if the pointer/string is corrupt.
+		out[i] =
+			(c >= 0x20 && c <= 0x7e) ? c : '?';
+	}
+
+	out[i] = '\0';
+}
+
+static u32 s_psbbnRc4Task = 0;
+static u64 s_psbbnRc4ScheduleCount = 0;
+
+static void psbbnProbeExec()
+{
+	static u64 count = 0;
+	const u64 id = ++count;
+
+	const u32 filename_ptr = cpuRegs.GPR.n.a0.UL[0];
+
+	char filename[256];
+	psbbnReadKernelString(
+		filename_ptr,
+		filename,
+		sizeof(filename));
+
+	if (std::strcmp(filename, "/etc/rc.d/rc.4") == 0)
+	{
+		s_psbbnRc4Task = cpuRegs.GPR.n.gp.UL[0];
+		s_psbbnRc4ScheduleCount = 0;
+
+		Console.Error(
+			"PSBBN RC4TASK task=%08X sp=%08X ra=%08X ASID=%02X",
+			s_psbbnRc4Task,
+			cpuRegs.GPR.n.sp.UL[0],
+			cpuRegs.GPR.n.ra.UL[0],
+			cpuRegs.CP0.n.EntryHi & 0xff);
+	}
+
+	Console.Error(
+		"PSBBN EXEC[%llu] file=\"%s\" fileptr=%08X "
+		"argv=%08X envp=%08X regs=%08X "
+		"gp=%08X sp=%08X ra=%08X ASID=%02X EntryHi=%08X",
+		id,
+		filename,
+		filename_ptr,
+		cpuRegs.GPR.n.a1.UL[0],
+		cpuRegs.GPR.n.a2.UL[0],
+		cpuRegs.GPR.n.a3.UL[0],
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff,
+		cpuRegs.CP0.n.EntryHi);
+
+		if (std::strcmp(filename, "/bin/su") == 0)
+		{
+			const u32 argv =
+				cpuRegs.GPR.n.a1.UL[0];
+		
+			for (u32 i = 0; i < 12; i++)
+			{
+				u32 argptr = 0;
+		
+				if (!psbbnReadGuestU32(
+						argv + i * 4, &argptr))
+				{
+					Console.Error(
+						"PSBBN EXECARG[%llu] argv[%u]=<unreadable>",
+						id, i);
+					break;
+				}
+		
+				if (argptr == 0)
+					break;
+		
+				char arg[256];
+		
+				if (!psbbnReadGuestString(
+						argptr, arg, sizeof(arg)))
+				{
+					Console.Error(
+						"PSBBN EXECARG[%llu] argv[%u] ptr=%08X <unreadable>",
+						id, i, argptr);
+					break;
+				}
+		
+				Console.Error(
+					"PSBBN EXECARG[%llu] argv[%u]=\"%s\" ptr=%08X",
+					id, i, arg, argptr);
+			}
+		}
+}
+
+static void psbbnProbeExecReturn()
+{
+	static u64 count = 0;
+	const u64 id = ++count;
+
+	const u32 raw = cpuRegs.GPR.n.v0.UL[0];
+	const s32 result = static_cast<s32>(raw);
+
+	Console.Error(
+		"PSBBN EXECRET[%llu] result=%d raw=%08X "
+		"gp=%08X sp=%08X ra=%08X ASID=%02X EntryHi=%08X",
+		id,
+		result,
+		raw,
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff,
+		cpuRegs.CP0.n.EntryHi);
+}
+
 static uptr psbbnGetTlbJitTarget()
 {
 	const u32 vpc = cpuRegs.pc;
+
+	if (vpc == 0x8001EB58u) // return from do_execve() to sys_execve
+		psbbnProbeExecReturn();
+
+	// Temporary PSBBN/Linux exec probe.
+	// do_execve is normally a direct KSEG0 target, so iBranchTest()
+	// forces this address through DispatcherReg while this probe is active.
+	if (vpc == 0x80065B78u) // do_execve
+		psbbnProbeExec();
 
 	static u64 tlbDispatchCount = 0;
 	const u64 dispatchId = ++tlbDispatchCount;
@@ -940,6 +1184,33 @@ static uptr psbbnGetTlbJitTarget()
 	const u32 slot = (vpc & 0xFFFu) >> 2;
 
 	return page.blocks[slot].GetFnptr();
+}
+
+static void psbbnProbeRc4Schedule()
+{
+	if (!s_psbbnRc4Task)
+		return;
+
+	const u32 task = cpuRegs.GPR.n.gp.UL[0];
+
+	if (task != s_psbbnRc4Task)
+		return;
+
+	const u64 id = ++s_psbbnRc4ScheduleCount;
+
+	if (id <= 100 || (id % 1000) == 0)
+	{
+		Console.Error(
+			"PSBBN RC4SCHED[%llu] task=%08X "
+			"sp=%08X ra=%08X "
+			"ASID=%02X EntryHi=%08X",
+			id,
+			task,
+			cpuRegs.GPR.n.sp.UL[0],
+			cpuRegs.GPR.n.ra.UL[0],
+			cpuRegs.CP0.n.EntryHi & 0xff,
+			cpuRegs.CP0.n.EntryHi);
+	}
 }
 
 static void psbbnRecompileTlbBlock()
@@ -1273,6 +1544,154 @@ static void psbbnProbeUnmappedRecLUT(u32 vpc)
 			Console.Error(
 				"PSBBN RECLUTPAGE[%03d] va=%08X slot=NONE",
 				id, vaddr);
+		}
+	}
+}
+
+static void psbbnScheduleProbe()
+{
+	static u64 count = 0;
+	static u32 last_gp = 0xffffffffu;
+	static u32 last_ra = 0xffffffffu;
+	static u32 last_sp = 0xffffffffu;
+	static u8 last_asid = 0xff;
+
+	const u64 id = ++count;
+
+	const u32 gp = cpuRegs.GPR.n.gp.UL[0];
+	const u32 sp = cpuRegs.GPR.n.sp.UL[0];
+	const u32 ra = cpuRegs.GPR.n.ra.UL[0];
+	const u8 asid = cpuRegs.CP0.n.EntryHi & 0xff;
+
+	// cpu_idle's own call to schedule().
+	if (ra == 0x80018604u)
+		return;
+
+	// Only report when the scheduling context changes.
+	if (gp == last_gp &&
+	    sp == last_sp &&
+	    ra == last_ra &&
+	    asid == last_asid)
+	{
+		return;
+	}
+
+	Console.Error(
+		"PSBBN SCHED[%llu] gp=%08X sp=%08X ra=%08X ASID=%02X",
+		id,
+		gp,
+		sp,
+		ra,
+		asid);
+
+	last_gp = gp;
+	last_sp = sp;
+	last_ra = ra;
+	last_asid = asid;
+}
+
+static void psbbnProbeDoExit()
+{
+	static u64 count = 0;
+	const u64 id = ++count;
+
+	Console.Error(
+		"PSBBN EXIT[%llu] code=%08X gp=%08X sp=%08X ra=%08X ASID=%02X",
+		id,
+		cpuRegs.GPR.n.a0.UL[0],
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff);
+}
+
+static void psbbnProbeForceSig()
+{
+	static u64 count = 0;
+	const u64 id = ++count;
+
+	Console.Error(
+		"PSBBN SIG[%llu] sig=%u task=%08X gp=%08X sp=%08X ra=%08X ASID=%02X",
+		id,
+		cpuRegs.GPR.n.a0.UL[0],
+		cpuRegs.GPR.n.a1.UL[0],
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff);
+}
+
+static void psbbnProbeForceSigInfo()
+{
+	static u64 count = 0;
+	const u64 id = ++count;
+
+	const u32 cause = cpuRegs.CP0.n.Cause;
+	const u32 epc = cpuRegs.CP0.n.EPC;
+	
+	const bool bd = (cause & 0x80000000u) != 0;
+	const u32 fault_pc = epc + (bd ? 4 : 0);
+	
+	u32 fault_code = 0;
+	const bool have_fault_code =
+		psbbnReadGuestU32(fault_pc, &fault_code);
+
+	Console.Error(
+		"PSBBN SIGINFO[%llu] sig=%u info=%08X task=%08X "
+		"kpc=%08X EPC=%08X BadVAddr=%08X Cause=%08X Status=%08X "
+		"gp=%08X sp=%08X ra=%08X ASID=%02X EntryHi=%08X",
+		id,
+		cpuRegs.GPR.n.a0.UL[0],
+		cpuRegs.GPR.n.a1.UL[0],
+		cpuRegs.GPR.n.a2.UL[0],
+		cpuRegs.pc,
+		cpuRegs.CP0.n.EPC,
+		cpuRegs.CP0.n.BadVAddr,
+		cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.Status.val,
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff,
+		cpuRegs.CP0.n.EntryHi);
+
+	Console.Error(
+		"PSBBN FAULTINST pc=%08X code=%08X valid=%u BD=%u",
+		fault_pc,
+		fault_code,
+		have_fault_code ? 1u : 0u,
+		bd ? 1u : 0u);
+}
+
+static void psbbnProbeUnalignedBranch()
+{
+	const u32 target = cpuRegs.pc;
+
+	Console.Error(
+		"PSBBN UNALIGNED target=%08X pcwb=%08X "
+		"v0=%08X a0=%08X a1=%08X "
+		"t9=%08X gp=%08X sp=%08X ra=%08X "
+		"ASID=%02X EntryHi=%08X",
+		target,
+		cpuRegs.pcWriteback,
+		cpuRegs.GPR.n.v0.UL[0],
+		cpuRegs.GPR.n.a0.UL[0],
+		cpuRegs.GPR.n.a1.UL[0],
+		cpuRegs.GPR.n.t9.UL[0],
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff,
+		cpuRegs.CP0.n.EntryHi);
+
+	for (u32 i = 1; i < 32; i++)
+	{
+		if (cpuRegs.GPR.r[i].UL[0] == target)
+		{
+			Console.Error(
+				"PSBBN UNALIGNED MATCH target=%08X r%u",
+				target,
+				i);
 		}
 	}
 }
@@ -1706,7 +2125,13 @@ void SetBranchReg()
 	iBranchTest();
 
 	unaligned.SetTarget();
-	xFastCall((const void*)recError, 1);
+
+	// Diagnostic only: make the guest GPR snapshot trustworthy before
+	// reporting the bad register-branch target.
+	iFlushCall(FLUSH_EVERYTHING);
+	xFastCall((void*)psbbnProbeUnalignedBranch);
+
+	xFastCall((const void*)recError, 1);	
 }
 
 void SetBranchImm(u32 imm)
@@ -2195,11 +2620,42 @@ u32 scaleblockcycles_clear()
 //   setting "g_branch = 2";
 static void iBranchTest(u32 newpc)
 {
+	// Temporary PSBBN/Linux scheduler probe.
+	// schedule() = 0x80026480 in this kernel.
+	/*if (newpc == 0x80026480u)
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnScheduleProbe);
+	}*/
+
+	// Temporary PSBBN/Linux process-lifecycle probes.
+	if (newpc == 0x80030720u) // do_exit
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbeDoExit);
+	}
+	else if (newpc == 0x80037490u) // force_sig
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbeForceSig);
+	}
+	else if (newpc == 0x80036F08u) // force_sig_info
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbeForceSigInfo);
+	}
+
+	if (newpc == 0x80026480u) // schedule()
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbeRc4Schedule);
+	}
+	
 	// Check the Event scheduler if our "cycle target" has been reached.
 	// Equiv code to:
 	//    cpuRegs.cycle += blockcycles;
 	//    if ( cpuRegs.cycle > g_nextEventCycle ) { DoEvents(); }
-
+	
 	if (EmuConfig.Speedhacks.WaitLoop && s_nBlockFF && newpc == s_branchTo)
 	{
 		xMOV(rax, ptr64[&cpuRegs.nextEventCycle]);
@@ -2218,6 +2674,7 @@ static void iBranchTest(u32 newpc)
 		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
 
 		if (newpc == 0xffffffff ||
+			newpc == 0x80065B78u || // Temporary: force do_execve through DispatcherReg
 			newpc < 0x80000000u ||
 			newpc >= 0xC0000000u)
 		{
@@ -3022,9 +3479,9 @@ static void recRecompile(const u32 startpc)
 	if (recPtr >= recPtrEnd)
 		eeRecNeedsReset = true;
 
-	if (HWADDR(startpc) == VMManager::Internal::GetCurrentELFEntryPoint())
+	if (startpc == VMManager::Internal::GetCurrentELFEntryPoint())
 		VMManager::Internal::EntryPointCompilingOnCPUThread();
-
+	
 	if (eeRecNeedsReset)
 	{
 		eeRecNeedsReset = false;
@@ -3046,7 +3503,7 @@ static void recRecompile(const u32 startpc)
 
 	pxAssert(s_pCurBlockEx);
 
-	if (HWADDR(startpc) == EELOAD_START)
+	if (startpc == EELOAD_START)
 	{
 		// The EELOAD _start function is the same across all BIOS versions
 		const u32 mainjump = memRead32(EELOAD_START + 0x9c);
@@ -3054,7 +3511,7 @@ static void recRecompile(const u32 startpc)
 			g_eeloadMain = ((EELOAD_START + 0xa0) & 0xf0000000U) | (mainjump << 2 & 0x0fffffffU);
 	}
 
-	if (g_eeloadMain && HWADDR(startpc) == HWADDR(g_eeloadMain))
+	if (g_eeloadMain && startpc == g_eeloadMain)
 	{
 		xFastCall((void*)eeloadHook);
 		if (VMManager::Internal::IsFastBootInProgress())
@@ -3074,7 +3531,7 @@ static void recRecompile(const u32 startpc)
 		}
 	}
 
-	if (g_eeloadExec && HWADDR(startpc) == HWADDR(g_eeloadExec))
+	if (g_eeloadExec && startpc == g_eeloadExec)
 		xFastCall((void*)eeloadHook2);
 
 	g_branch = 0;
