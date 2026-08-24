@@ -569,7 +569,25 @@ static u32 psbbnShouldInterpretKuseg()
 static bool tlbJitCanCompileOne(u32 code)
 {
 	const u32 op = code >> 26;
-		
+
+	// A/B
+	if (op == 0x11) // COP1
+	{
+	    const u32 rs = (code >> 21) & 0x1f;
+	    const u32 funct = code & 0x3f;
+	
+	    if (rs == 0x10 &&
+	        (funct == 0x00 || // ADD.S
+	         funct == 0x02))  // MUL.S
+	    {
+	        return true;
+	    }
+	
+	    if (rs == 0x04) // MTC1
+	            return true;
+	        
+	}
+	
 	switch (op)
 	{
 		case 0: // SPECIAL
@@ -730,6 +748,10 @@ static bool tlbJitCanCompileDelaySlot(u32 code)
 	
 	if (is_break)
 	    return true;
+
+	// Keep COP1 delay slots on the old fallback path for this A/B.
+	if (op == 0x11)
+	    return false;
 	
     if (!tlbJitCanCompileOne(code))
         return false;
@@ -1599,7 +1621,7 @@ static void psbbnRecompileTlbBlock()
 		
 			const u32 delay_code =
 				tlbJitReadCode(endpc + 4, vpage, ppage);
-		
+			
 			// Keep tricky/faulting delay slots on the interpreter path
 			// during this first native-branch phase.
 			if (!tlbJitCanCompileDelaySlot(delay_code))
@@ -1611,6 +1633,31 @@ static void psbbnRecompileTlbBlock()
 				
 				const u64 branch_delay_count =
 				    ++branch_delay_counts[branch_op][delay_op];
+
+				if (delay_op == 0x11) // COP1
+				{
+				    const u32 cop1_rs = (delay_code >> 21) & 0x1f;
+				    const u32 cop1_rt = (delay_code >> 16) & 0x1f;
+				    const u32 cop1_funct = delay_code & 0x3f;
+				
+				    static u64 cop1_delay_counts[32][64] = {};
+				
+				    const u64 cop1_count =
+				        ++cop1_delay_counts[cop1_rs][cop1_funct];
+				
+				    if ((cop1_count & (cop1_count - 1)) == 0)
+				    {
+				        Console.Error(
+				            "PSBBN COP1DELAY rs=%02X funct=%02X rt=%02X "
+				            "count=%llu pc=%08X code=%08X",
+				            cop1_rs,
+				            cop1_funct,
+				            cop1_rt,
+				            cop1_count,
+				            endpc + 4,
+				            delay_code);
+				    }
+				}
 				
 				if ((branch_delay_count & (branch_delay_count - 1)) == 0)
 				{
@@ -1642,7 +1689,7 @@ static void psbbnRecompileTlbBlock()
 		
 				break;
 			}
-		
+			
 			endpc += 8;
 			instruction_count += 2;
 			has_native_branch = true;
@@ -1688,6 +1735,31 @@ static void psbbnRecompileTlbBlock()
 		    tlbJitReadCode(startpc, vpage, ppage);
 		
 		const u32 fallback_op = fallback_code >> 26;
+
+		if (fallback_op == 0x11) // COP1
+		{
+		    const u32 cop1_rs = (fallback_code >> 21) & 0x1f;
+		    const u32 cop1_rt = (fallback_code >> 16) & 0x1f;
+		    const u32 cop1_funct = fallback_code & 0x3f;
+		
+		    static u64 cop1_fallback_counts[32][64] = {};
+		
+		    const u64 cop1_count =
+		        ++cop1_fallback_counts[cop1_rs][cop1_funct];
+		
+		    if ((cop1_count & (cop1_count - 1)) == 0)
+		    {
+		        Console.Error(
+		            "PSBBN COP1FALLBACK rs=%02X funct=%02X rt=%02X "
+		            "count=%llu pc=%08X code=%08X",
+		            cop1_rs,
+		            cop1_funct,
+		            cop1_rt,
+		            cop1_count,
+		            startpc,
+		            fallback_code);
+		    }
+		}
 		
 		static u64 fallback_counts[64] = {};
 		
