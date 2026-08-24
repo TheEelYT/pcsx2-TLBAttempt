@@ -578,13 +578,23 @@ static bool tlbJitCanCompileOne(u32 code)
 	
 	    if (rs == 0x10 &&
 	        (funct == 0x00 || // ADD.S
-	         funct == 0x02))  // MUL.S
+	         funct == 0x01 || // SUB.S
+	         funct == 0x02 || // MUL.S
+	         funct == 0x03 || // DIV.S
+	         funct == 0x05 || // ABS.S
+	         funct == 0x06 || // MOV.S
+	         funct == 0x07 || // NEG.S
+	         funct == 0x24 || // CVT.W.S
+	         funct == 0x34))  // C.LT.S
 	    {
 	        return true;
 	    }
 	
 	    if (rs == 0x04) // MTC1
 	            return true;
+
+	    if (rs == 0x14 && funct == 0x20) // CVT.S.W
+	        return true;
 	        
 	}
 	
