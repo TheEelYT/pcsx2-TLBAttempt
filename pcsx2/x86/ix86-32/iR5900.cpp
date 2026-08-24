@@ -552,7 +552,7 @@ static u32 psbbnShouldInterpretKuseg()
 static bool tlbJitCanCompileOne(u32 code)
 {
 	const u32 op = code >> 26;
-
+		
 	switch (op)
 	{
 		case 0: // SPECIAL
@@ -606,6 +606,22 @@ static bool tlbJitCanCompileOne(u32 code)
 		case 17:
 		case 18:
 
+        // Temporary A/B: interpret all sparse-TLB memory operations.
+        case 26: // LDL
+        case 27: // LDR
+        case 30: // LQ
+
+        case 32: // LB
+        case 33: // LH
+        case 34: // LWL
+        case 35: // LW
+        case 36: // LBU
+        case 37: // LHU
+        case 38: // LWR
+        case 39: // LWU
+
+        case 55: // LD
+
 		// COP load/store paths can come later.
 		case 49: // LWC1
 		case 54: // LQC2
@@ -619,18 +635,9 @@ static bool tlbJitCanCompileOne(u32 code)
 }
 
 static bool tlbJitIsNativeBranch(u32 code)
-	{
+{
 	const u32 op = code >> 26;
 
-	// Temporary A/B test: don't natively compile JR/JALR in sparse TLB JIT.
-	if (op == 0x00)
-	{
-		const u32 funct = code & 0x3f;
-
-		if (funct == 0x08) // JR only
-			return false;			
-	}
-	
 	switch (op)
 	{
 		case 0: // SPECIAL
@@ -969,6 +976,13 @@ static void psbbnReadKernelString(u32 addr, char* out, size_t out_size)
 static u32 s_psbbnRc4Task = 0;
 static u64 s_psbbnRc4ScheduleCount = 0;
 
+static u32 s_psbbnRcBnTask = 0;
+static u64 s_psbbnRcBnScheduleCount = 0;
+
+static u32 s_psbbnRcBnPipeWaitQueue = 0;
+
+static u64 s_psbbnPipeTraceCount = 0;
+
 static void psbbnProbeExec()
 {
 	static u64 count = 0;
@@ -982,19 +996,35 @@ static void psbbnProbeExec()
 		filename,
 		sizeof(filename));
 
-	if (std::strcmp(filename, "/etc/rc.d/rc.4") == 0)
-	{
-		s_psbbnRc4Task = cpuRegs.GPR.n.gp.UL[0];
-		s_psbbnRc4ScheduleCount = 0;
+		if (std::strcmp(filename, "/etc/rc.d/rc.4") == 0)
+		{
+			s_psbbnRc4Task = cpuRegs.GPR.n.gp.UL[0];
+			s_psbbnRc4ScheduleCount = 0;
 
-		Console.Error(
-			"PSBBN RC4TASK task=%08X sp=%08X ra=%08X ASID=%02X",
-			s_psbbnRc4Task,
-			cpuRegs.GPR.n.sp.UL[0],
-			cpuRegs.GPR.n.ra.UL[0],
-			cpuRegs.CP0.n.EntryHi & 0xff);
-	}
+			Console.Error(
+				"PSBBN RC4TASK task=%08X sp=%08X ra=%08X ASID=%02X",
+				s_psbbnRc4Task,
+				cpuRegs.GPR.n.sp.UL[0],
+				cpuRegs.GPR.n.ra.UL[0],
+				cpuRegs.CP0.n.EntryHi & 0xff);
+		}
 
+		if (std::strcmp(filename, "/etc/rc.d/rc.bn") == 0)
+		{
+			s_psbbnRcBnTask = cpuRegs.GPR.n.gp.UL[0];
+			s_psbbnRcBnScheduleCount = 0;
+			
+			s_psbbnRcBnPipeWaitQueue = 0;
+			s_psbbnPipeTraceCount = 0;
+
+			Console.Error(
+				"PSBBN RCBNTASK task=%08X sp=%08X ra=%08X ASID=%02X",
+				s_psbbnRcBnTask,
+				cpuRegs.GPR.n.sp.UL[0],
+				cpuRegs.GPR.n.ra.UL[0],
+				cpuRegs.CP0.n.EntryHi & 0xff);
+		}
+		
 	Console.Error(
 		"PSBBN EXEC[%llu] file=\"%s\" fileptr=%08X "
 		"argv=%08X envp=%08X regs=%08X "
@@ -1048,6 +1078,225 @@ static void psbbnProbeExec()
 					id, i, arg, argptr);
 			}
 		}
+}
+
+static void psbbnProbeRcBnPipeWait()
+{
+	if (!s_psbbnRcBnTask)
+		return;
+
+	const u32 task = cpuRegs.GPR.n.gp.UL[0];
+
+	if (task != s_psbbnRcBnTask)
+		return;
+
+	const u32 inode = cpuRegs.GPR.n.a0.UL[0];
+
+	u32 pipe = 0;
+	u32 len = 0;
+	u32 start = 0;
+	u32 readers = 0;
+	u32 writers = 0;
+	u32 waiting_readers = 0;
+	u32 waiting_writers = 0;
+
+	if (!psbbnReadGuestU32(inode + 0x104, &pipe))
+		return;
+
+	// struct pipe_inode_info layout in this kernel:
+	// +10 len
+	// +14 start
+	// +18 readers
+	// +1C writers
+	// +20 waiting_readers
+	// +24 waiting_writers
+	psbbnReadGuestU32(pipe + 0x10, &len);
+	psbbnReadGuestU32(pipe + 0x14, &start);
+	psbbnReadGuestU32(pipe + 0x18, &readers);
+	psbbnReadGuestU32(pipe + 0x1c, &writers);
+	psbbnReadGuestU32(pipe + 0x20, &waiting_readers);
+	psbbnReadGuestU32(pipe + 0x24, &waiting_writers);
+
+	s_psbbnRcBnPipeWaitQueue = pipe;
+
+	Console.Error(
+		"PSBBN RCBNPIPEWAIT task=%08X inode=%08X pipe=%08X "
+		"len=%u start=%u readers=%u writers=%u "
+		"waitR=%u waitW=%u sp=%08X ra=%08X",
+		task,
+		inode,
+		pipe,
+		len,
+		start,
+		readers,
+		writers,
+		waiting_readers,
+		waiting_writers,
+		cpuRegs.GPR.n.sp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0]);
+}
+
+static void psbbnProbePipeWake()
+{
+	if (!s_psbbnRcBnPipeWaitQueue)
+		return;
+
+	const u32 queue = cpuRegs.GPR.n.a0.UL[0];
+
+	if (queue != s_psbbnRcBnPipeWaitQueue)
+		return;
+
+	Console.Error(
+		"PSBBN PIPEWAKE queue=%08X task=%08X ra=%08X ASID=%02X",
+		queue,
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff);
+}
+
+static void psbbnProbePipeWakeSync()
+{
+	if (!s_psbbnRcBnPipeWaitQueue)
+		return;
+
+	const u32 queue = cpuRegs.GPR.n.a0.UL[0];
+
+	if (queue != s_psbbnRcBnPipeWaitQueue)
+		return;
+
+	Console.Error(
+		"PSBBN PIPEWAKESYNC queue=%08X task=%08X ra=%08X ASID=%02X",
+		queue,
+		cpuRegs.GPR.n.gp.UL[0],
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff);
+}
+
+static bool psbbnGetPipeFromFile(u32 file, u32* inode_out, u32* pipe_out)
+{
+	u32 dentry = 0;
+	u32 inode = 0;
+	u32 pipe = 0;
+
+	// Confirmed from pipe_write():
+	// file + 0x08 -> dentry
+	// dentry + 0x08 -> inode
+	// inode + 0x104 -> pipe_inode_info
+	if (!psbbnReadGuestU32(file + 0x08, &dentry) ||
+		!psbbnReadGuestU32(dentry + 0x08, &inode) ||
+		!psbbnReadGuestU32(inode + 0x104, &pipe))
+	{
+		return false;
+	}
+
+	*inode_out = inode;
+	*pipe_out = pipe;
+	return true;
+}
+
+static void psbbnProbePipeWrite()
+{
+	if (!s_psbbnRcBnTask)
+		return;
+
+	const u32 file = cpuRegs.GPR.n.a0.UL[0];
+	const u32 buf = cpuRegs.GPR.n.a1.UL[0];
+	const u32 count = cpuRegs.GPR.n.a2.UL[0];
+
+	u32 inode = 0;
+	u32 pipe = 0;
+
+	if (!psbbnGetPipeFromFile(file, &inode, &pipe))
+		return;
+
+	// Before we know which pipe rc.bn waits on, trace all pipe writes.
+	// Once known, only trace that exact pipe.
+	if (s_psbbnRcBnPipeWaitQueue &&
+		pipe != s_psbbnRcBnPipeWaitQueue)
+	{
+		return;
+	}
+
+	u32 len = 0;
+	u32 readers = 0;
+	u32 writers = 0;
+	u32 waitR = 0;
+	u32 waitW = 0;
+
+	psbbnReadGuestU32(pipe + 0x10, &len);
+	psbbnReadGuestU32(pipe + 0x18, &readers);
+	psbbnReadGuestU32(pipe + 0x1c, &writers);
+	psbbnReadGuestU32(pipe + 0x20, &waitR);
+	psbbnReadGuestU32(pipe + 0x24, &waitW);
+
+	const u64 id = ++s_psbbnPipeTraceCount;
+
+	Console.Error(
+		"PSBBN PIPEWRITE[%llu] task=%08X file=%08X inode=%08X "
+		"pipe=%08X buf=%08X count=%u len=%u readers=%u writers=%u "
+		"waitR=%u waitW=%u ra=%08X ASID=%02X",
+		id,
+		cpuRegs.GPR.n.gp.UL[0],
+		file,
+		inode,
+		pipe,
+		buf,
+		count,
+		len,
+		readers,
+		writers,
+		waitR,
+		waitW,
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff);
+}
+
+static void psbbnProbePipeRelease()
+{
+	if (!s_psbbnRcBnTask)
+		return;
+
+	// pipe_release(inode, readers_to_remove, writers_to_remove)
+	const u32 inode = cpuRegs.GPR.n.a0.UL[0];
+	const u32 dec_readers = cpuRegs.GPR.n.a1.UL[0];
+	const u32 dec_writers = cpuRegs.GPR.n.a2.UL[0];
+
+	u32 pipe = 0;
+
+	if (!psbbnReadGuestU32(inode + 0x104, &pipe))
+		return;
+
+	if (s_psbbnRcBnPipeWaitQueue &&
+		pipe != s_psbbnRcBnPipeWaitQueue)
+	{
+		return;
+	}
+
+	u32 len = 0;
+	u32 readers = 0;
+	u32 writers = 0;
+
+	psbbnReadGuestU32(pipe + 0x10, &len);
+	psbbnReadGuestU32(pipe + 0x18, &readers);
+	psbbnReadGuestU32(pipe + 0x1c, &writers);
+
+	const u64 id = ++s_psbbnPipeTraceCount;
+
+	Console.Error(
+		"PSBBN PIPERELEASE[%llu] task=%08X inode=%08X pipe=%08X "
+		"decR=%u decW=%u len=%u readers=%u writers=%u "
+		"ra=%08X ASID=%02X",
+		id,
+		cpuRegs.GPR.n.gp.UL[0],
+		inode,
+		pipe,
+		dec_readers,
+		dec_writers,
+		len,
+		readers,
+		writers,
+		cpuRegs.GPR.n.ra.UL[0],
+		cpuRegs.CP0.n.EntryHi & 0xff);
 }
 
 static void psbbnProbeExecReturn()
@@ -1213,6 +1462,33 @@ static void psbbnProbeRc4Schedule()
 	}
 }
 
+static void psbbnProbeRcBnSchedule()
+{
+	if (!s_psbbnRcBnTask)
+		return;
+
+	const u32 task = cpuRegs.GPR.n.gp.UL[0];
+
+	if (task != s_psbbnRcBnTask)
+		return;
+
+	const u64 id = ++s_psbbnRcBnScheduleCount;
+
+	if (id <= 100 || (id % 1000) == 0)
+	{
+		Console.Error(
+			"PSBBN RCBNSCHED[%llu] task=%08X "
+			"sp=%08X ra=%08X "
+			"ASID=%02X EntryHi=%08X",
+			id,
+			task,
+			cpuRegs.GPR.n.sp.UL[0],
+			cpuRegs.GPR.n.ra.UL[0],
+			cpuRegs.CP0.n.EntryHi & 0xff,
+			cpuRegs.CP0.n.EntryHi);
+	}
+}
+
 static void psbbnRecompileTlbBlock()
 {
 	const u32 startpc = cpuRegs.pc;
@@ -1277,17 +1553,17 @@ static void psbbnRecompileTlbBlock()
 			// same translated 4K page.
 			if (endpc + 8 > page_end)
 				break;
-
+		
 			const u32 delay_code =
 				tlbJitReadCode(endpc + 4, vpage, ppage);
-
+		
 			// Keep tricky/faulting delay slots on the interpreter path
 			// during this first native-branch phase.
 			if (!tlbJitCanCompileDelaySlot(delay_code))
 			{
 				static u64 branchDelayFallbackCount = 0;
 				const u64 id = ++branchDelayFallbackCount;
-
+		
 				if (id <= 100 || (id % 100000) == 0)
 				{
 					Console.Error(
@@ -1299,21 +1575,46 @@ static void psbbnRecompileTlbBlock()
 						delay_code,
 						delay_code >> 26);
 				}
-
+		
 				break;
 			}
-			
+		
 			endpc += 8;
 			instruction_count += 2;
 			has_native_branch = true;
 			break;
 		}
+	
+        // Temporary A/B:
+        // Allow LW through the recompiler only when it is the
+        // sole instruction in this sparse block.
+		const u32 op = code >> 26;
 
-		if (!tlbJitCanCompileOne(code))
-			break;
+		const bool is_interp_gpr_memory =
+			op == 26 || // LDL
+		    op == 27 || // LDR
+		    op == 30 || // LQ
+		    op == 31 || // SQ
+		    (op >= 32 && op <= 46) || // LB..SWR
+		    op == 49 || // LWC1
+		    op == 54 || // LQC2
+		    op == 55 || // LD
+		    op == 57 || // SWC1
+		    op == 62 || // SQC2
+		    op == 63;   // SD		    
 
-		endpc += 4;
-		instruction_count++;
+		if (is_interp_gpr_memory)
+		{
+		    endpc += 4;
+		    instruction_count++;
+		    break;
+		}		
+
+        if (!tlbJitCanCompileOne(code))
+            break;
+
+        endpc += 4;
+        instruction_count++;		
 	}
 
 	// First instruction itself is something we don't trust natively yet.
@@ -1432,12 +1733,38 @@ static void psbbnRecompileTlbBlock()
 	}
 	else
 	{
-		pxAssert(g_branch == 0);
-		pxAssert(pc == endpc);
+	    pxAssert(g_branch == 0);
+	    pxAssert(pc == endpc);
+		
+	    iFlushCall(FLUSH_EVERYTHING);
+		
+		const u32 last_code =
+		    tlbJitReadCode(endpc - 4, vpage, ppage);
 
-		iFlushCall(FLUSH_EVERYTHING);
-		xMOV(ptr32[&cpuRegs.pc], endpc);
-		iBranchTest(endpc);
+		const u32 last_op = last_code >> 26;
+
+		const bool ends_with_interp_gpr_memory =
+		    last_op == 26 || // LDL
+		    last_op == 27 || // LDR
+		    last_op == 30 || // LQ
+		    last_op == 31 || // SQ
+		    (last_op >= 32 && last_op <= 46) || // LB..SWR
+		    last_op == 49 || // LWC1
+		    last_op == 54 || // LQC2
+		    last_op == 55 || // LD
+		    last_op == 57 || // SWC1
+		    last_op == 62 || // SQC2
+		    last_op == 63;   // SD
+   
+		if (ends_with_interp_gpr_memory)
+		{
+		    iBranchTest(0xffffffff);
+		}
+		else
+		{
+		    xMOV(ptr32[&cpuRegs.pc], endpc);
+		    iBranchTest(endpc);
+		}
 	}
 
 	// Use the amount of guest code the branch compiler actually consumed.
@@ -2649,6 +2976,37 @@ static void iBranchTest(u32 newpc)
 	{
 		iFlushCall(FLUSH_EVERYTHING);
 		xFastCall((void*)psbbnProbeRc4Schedule);
+		xFastCall((void*)psbbnProbeRcBnSchedule);
+	}
+
+	if (newpc == 0x80066170u) // pipe_wait()
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbeRcBnPipeWait);
+	}
+	
+	if (newpc == 0x80026A90u) // __wake_up()
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbePipeWake);
+	}
+	
+	if (newpc == 0x80026CC0u) // __wake_up_sync()
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbePipeWakeSync);
+	}
+
+	if (newpc == 0x800665F0u) // pipe_write()
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbePipeWrite);
+	}
+	
+	if (newpc == 0x80066AF0u) // pipe_release()
+	{
+		iFlushCall(FLUSH_EVERYTHING);
+		xFastCall((void*)psbbnProbePipeRelease);
 	}
 	
 	// Check the Event scheduler if our "cycle target" has been reached.
