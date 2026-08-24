@@ -724,6 +724,13 @@ static bool tlbJitCanCompileDelaySlot(u32 code)
     if (is_interp_memory)
         return true;
 
+	const bool is_break =
+	    op == 0 &&
+	    (code & 0x3f) == 0x0d;
+	
+	if (is_break)
+	    return true;
+	
     if (!tlbJitCanCompileOne(code))
         return false;
 
