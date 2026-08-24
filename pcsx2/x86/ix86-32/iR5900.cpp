@@ -436,20 +436,37 @@ void recCall(void (*func)())
 	// cpuRegs.branch=1 so cpuException() sets EPC to the branch and BD=1.
 	if (s_tlbJitCompiling && g_recompilingDelaySlot)
 	{
-		xMOV(ptr32[&cpuRegs.pc], pc + 4);
-		xMOV(ptr32[&cpuRegs.branch], 1);
-
-		xFastCall((void*)func);
-
-		// Normal return: we're no longer executing the runtime delay slot.
-		// If func raised an exception, cpuException() already cleared this
-		// before recExitExecution() left the JIT.
-		xMOV(ptr32[&cpuRegs.branch], 0);
+	    const u32 expected_pc = pc + 4;
+	
+	    xMOV(ptr32[&cpuRegs.pc], expected_pc);
+	    xMOV(ptr32[&cpuRegs.branch], 1);
+	
+	    xFastCall((void*)func);
+	
+	    // cpuException() has already consumed branch=1 if the
+	    // interpreter-backed delay-slot instruction faulted.
+	    xMOV(ptr32[&cpuRegs.branch], 0);
+	
+	    // Normal memory instruction:
+	    //     cpuRegs.pc is still expected_pc.
+	    //
+	    // Guest exception:
+	    //     cpuException() replaced cpuRegs.pc with the exception vector.
+	    //
+	    // In the exception case, dispatch immediately using the runtime PC
+	    // instead of letting the native branch code overwrite it.
+	    xCMP(ptr32[&cpuRegs.pc], expected_pc);
+	    xForwardJE32 no_exception;
+	
+	    iBranchTest(0xffffffff);
+	
+	    no_exception.SetTarget();
 	}
 	else
 	{
-		xFastCall((void*)func);
+	    xFastCall((void*)func);
 	}
+	
 }
 
 // =====================================================================================================
@@ -686,15 +703,34 @@ static bool tlbJitIsNativeBranch(u32 code)
 
 static bool tlbJitCanCompileDelaySlot(u32 code)
 {
-	// Keep branches-in-delay-slots and instructions which our prototype
-	// doesn't yet trust out of the native TLB path.
-	if (!tlbJitCanCompileOne(code))
-		return false;
+    const u32 op = code >> 26;
 
-	if (tlbJitIsNativeBranch(code))
-		return false;
+    const bool is_interp_memory =
+        op == 26 || // LDL
+        op == 27 || // LDR
+        op == 30 || // LQ
+        op == 31 || // SQ
+        (op >= 32 && op <= 46) || // LB..SWR
+        op == 49 || // LWC1
+        op == 54 || // LQC2
+        op == 55 || // LD
+        op == 57 || // SWC1
+        op == 62 || // SQC2
+        op == 63;   // SD
 
-	return true;
+    // Interpreter-backed memory instructions can fault in a delay slot.
+    // recCall() now preserves the runtime exception PC/BD state before
+    // the native branch completion can overwrite it.
+    if (is_interp_memory)
+        return true;
+
+    if (!tlbJitCanCompileOne(code))
+        return false;
+
+    if (tlbJitIsNativeBranch(code))
+        return false;
+
+    return true;
 }
 
 // called when jumping to variable pc address
@@ -1561,6 +1597,27 @@ static void psbbnRecompileTlbBlock()
 			// during this first native-branch phase.
 			if (!tlbJitCanCompileDelaySlot(delay_code))
 			{
+				const u32 branch_op = code >> 26;
+				const u32 delay_op = delay_code >> 26;
+				
+				static u64 branch_delay_counts[64][64] = {};
+				
+				const u64 branch_delay_count =
+				    ++branch_delay_counts[branch_op][delay_op];
+				
+				if ((branch_delay_count & (branch_delay_count - 1)) == 0)
+				{
+				    Console.Error(
+				        "PSBBN BRANCHDELAY branchop=%02X delayop=%02X "
+				        "count=%llu pc=%08X branch=%08X delay=%08X",
+				        branch_op,
+				        delay_op,
+				        branch_delay_count,
+				        endpc,
+				        code,
+				        delay_code);
+				}
+				
 				static u64 branchDelayFallbackCount = 0;
 				const u64 id = ++branchDelayFallbackCount;
 		
@@ -1620,6 +1677,32 @@ static void psbbnRecompileTlbBlock()
 	// First instruction itself is something we don't trust natively yet.
 	if (instruction_count == 0)
 	{
+		const u32 fallback_code =
+		    tlbJitReadCode(startpc, vpage, ppage);
+		
+		const u32 fallback_op = fallback_code >> 26;
+		
+		static u64 fallback_counts[64] = {};
+		
+		const u64 fallback_count =
+		    ++fallback_counts[fallback_op];
+		
+		// Log at 1, 2, 4, 8, 16, 32... occurrences.
+		// This gives us frequency information without flooding the log.
+		if ((fallback_count & (fallback_count - 1)) == 0)
+		{
+		    Console.Error(
+		        "PSBBN FALLBACK op=%02X count=%llu pc=%08X code=%08X "
+		        "rs=%u rt=%u funct=%02X",
+		        fallback_op,
+		        fallback_count,
+		        startpc,
+		        fallback_code,
+		        (fallback_code >> 21) & 0x1f,
+		        (fallback_code >> 16) & 0x1f,
+		        fallback_code & 0x3f);
+		}
+	
 		static u64 tlbFallbackCount = 0;
 		const u64 id = ++tlbFallbackCount;
 
