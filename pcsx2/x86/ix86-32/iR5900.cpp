@@ -114,6 +114,8 @@ static bool s_tlbJitCompiling = false;
 static u32 s_tlbJitCompileVPage = 0;
 static u32 s_tlbJitCompilePPage = 0;
 
+static u32 s_psbbnSparseRecCallCounts[64] = {};
+
 static __fi int* tlbJitCodePtr(u32 vaddr)
 {
 	u32 addr = vaddr;
@@ -428,6 +430,15 @@ void recCall(void (*func)())
 {
 	iFlushCall(FLUSH_INTERPRETER);
 
+	if (s_tlbJitCompiling)
+	{
+	    const u32 op = cpuRegs.code >> 26;
+	
+	    xADD(
+	        ptr32[&s_psbbnSparseRecCallCounts[op]],
+	        1);
+	}
+	
 	// Temporary TLB-JIT correctness bridge for interpreter-backed
 	// instructions in a branch delay slot.
 	//
@@ -682,7 +693,23 @@ static bool tlbJitCanCompileOne(u32 code)
 static bool tlbJitIsNativeBranch(u32 code)
 {
 	const u32 op = code >> 26;
-
+	
+	if (op == 0x11) // COP1
+	{
+	    const u32 rs = (code >> 21) & 0x1f;
+	    const u32 rt = (code >> 16) & 0x1f;
+	
+	    // A/B test: BC1F, & BC1FL.
+	    if (rs == 0x08 &&
+			(rt == 0x00 || // BC1F
+			 rt == 0x02))  // BC1FL
+	        {
+	            return true;
+	        }
+	
+	    return false;
+	}
+	
 	switch (op)
 	{
 		case 0: // SPECIAL
@@ -760,8 +787,26 @@ static bool tlbJitCanCompileDelaySlot(u32 code)
 	    return true;
 
 	// Keep COP1 delay slots on the old fallback path for this A/B.
-	if (op == 0x11)
-	    return false;
+	if (op == 0x11) // COP1
+	    {
+	        const u32 rs = (code >> 21) & 0x1f;
+	        const u32 funct = code & 0x3f;
+	    
+	        const bool is_safe_cop1_delay =
+	            rs == 0x10 &&
+	            (funct == 0x00 || // ADD.S
+	             funct == 0x01 || // SUB.S
+	             funct == 0x02 || // MUL.S
+	             funct == 0x05 || // ABS.S
+	             funct == 0x06 || // MOV.S
+	             funct == 0x07 || // NEG.S
+	             funct == 0x32); // C.EQ.S
+	    
+	        if (is_safe_cop1_delay)
+	            return true;
+	    
+	        return false;
+	    }
 	
     if (!tlbJitCanCompileOne(code))
         return false;
@@ -1071,27 +1116,81 @@ static void psbbnProbeExec()
 		filename,
 		sizeof(filename));
 
-		if (std::strcmp(filename, "/etc/rc.d/rc.4") == 0)
-		{
-			s_psbbnRc4Task = cpuRegs.GPR.n.gp.UL[0];
-			s_psbbnRc4ScheduleCount = 0;
+	static bool dumped_sparse_rec_calls = false;
+	
+	if (!dumped_sparse_rec_calls &&
+	    std::strcmp(filename, "/sbin/pidof") == 0)
+	{
+	    dumped_sparse_rec_calls = true;
+	
+	    Console.Error(
+	        "PSBBN MEMRUNTIME "
+	        "LDL=%u LDR=%u LQ=%u SQ=%u "
+	        "LB=%u LH=%u LWL=%u LW=%u "
+	        "LBU=%u LHU=%u LWR=%u LWU=%u "
+	        "SB=%u SH=%u SWL=%u SW=%u "
+	        "SDL=%u SDR=%u SWR=%u "
+	        "LWC1=%u LQC2=%u LD=%u "
+	        "SWC1=%u SQC2=%u SD=%u",
+	        s_psbbnSparseRecCallCounts[26],
+	        s_psbbnSparseRecCallCounts[27],
+	        s_psbbnSparseRecCallCounts[30],
+	        s_psbbnSparseRecCallCounts[31],
+	
+	        s_psbbnSparseRecCallCounts[32],
+	        s_psbbnSparseRecCallCounts[33],
+	        s_psbbnSparseRecCallCounts[34],
+	        s_psbbnSparseRecCallCounts[35],
+	
+	        s_psbbnSparseRecCallCounts[36],
+	        s_psbbnSparseRecCallCounts[37],
+	        s_psbbnSparseRecCallCounts[38],
+	        s_psbbnSparseRecCallCounts[39],
+	
+	        s_psbbnSparseRecCallCounts[40],
+	        s_psbbnSparseRecCallCounts[41],
+	        s_psbbnSparseRecCallCounts[42],
+	        s_psbbnSparseRecCallCounts[43],
+	
+	        s_psbbnSparseRecCallCounts[44],
+	        s_psbbnSparseRecCallCounts[45],
+	        s_psbbnSparseRecCallCounts[46],
+	
+	        s_psbbnSparseRecCallCounts[49],
+	        s_psbbnSparseRecCallCounts[54],
+	        s_psbbnSparseRecCallCounts[55],
+	
+	        s_psbbnSparseRecCallCounts[57],
+	        s_psbbnSparseRecCallCounts[62],
+	        s_psbbnSparseRecCallCounts[63]);
+	}
 
-			Console.Error(
-				"PSBBN RC4TASK task=%08X sp=%08X ra=%08X ASID=%02X",
-				s_psbbnRc4Task,
-				cpuRegs.GPR.n.sp.UL[0],
-				cpuRegs.GPR.n.ra.UL[0],
-				cpuRegs.CP0.n.EntryHi & 0xff);
+	if (std::strcmp(filename, "/etc/rc.d/rc.4") == 0)
+	{
+		s_psbbnRc4Task = cpuRegs.GPR.n.gp.UL[0];
+		s_psbbnRc4ScheduleCount = 0;
+
+		if (false && false)
+		{
+		Console.Error(
+			"PSBBN RC4TASK task=%08X sp=%08X ra=%08X ASID=%02X",
+			s_psbbnRc4Task,
+			cpuRegs.GPR.n.sp.UL[0],
+			cpuRegs.GPR.n.ra.UL[0],
+			cpuRegs.CP0.n.EntryHi & 0xff);
 		}
+	}
 
-		if (std::strcmp(filename, "/etc/rc.d/rc.bn") == 0)
+	if (std::strcmp(filename, "/etc/rc.d/rc.bn") == 0)
+	{
+		s_psbbnRcBnTask = cpuRegs.GPR.n.gp.UL[0];
+		s_psbbnRcBnScheduleCount = 0;
+		
+		s_psbbnRcBnPipeWaitQueue = 0;
+		s_psbbnPipeTraceCount = 0;
+
+		if (false && false)
 		{
-			s_psbbnRcBnTask = cpuRegs.GPR.n.gp.UL[0];
-			s_psbbnRcBnScheduleCount = 0;
-			
-			s_psbbnRcBnPipeWaitQueue = 0;
-			s_psbbnPipeTraceCount = 0;
-
 			Console.Error(
 				"PSBBN RCBNTASK task=%08X sp=%08X ra=%08X ASID=%02X",
 				s_psbbnRcBnTask,
@@ -1099,6 +1198,7 @@ static void psbbnProbeExec()
 				cpuRegs.GPR.n.ra.UL[0],
 				cpuRegs.CP0.n.EntryHi & 0xff);
 		}
+	}
 		
 	Console.Error(
 		"PSBBN EXEC[%llu] file=\"%s\" fileptr=%08X "
@@ -1411,7 +1511,7 @@ static uptr psbbnGetTlbJitTarget()
 	static u64 tlbDispatchCount = 0;
 	const u64 dispatchId = ++tlbDispatchCount;
 	
-	if ((dispatchId % 1000000) == 0)
+	if (false && ((dispatchId % 1000000) == 0))
 	{
 		Console.Error(
 			"PSBBN TLBJITDISPATCH[%llu] pc=%08X ASID=%02X",
@@ -1478,11 +1578,14 @@ static uptr psbbnGetTlbJitTarget()
 		for (BASEBLOCK& block : page->blocks)
 			block.SetFnptr(reinterpret_cast<uptr>(TlbJITCompile));
 
-		Console.Error(
-			"PSBBN TLBJITPAGE vpage=%08X ppage=%08X ASID=%02X",
-			vpage,
-			ppage,
-			asid);
+		if (false && false) 
+		{
+			Console.Error(
+				"PSBBN TLBJITPAGE vpage=%08X ppage=%08X ASID=%02X",
+				vpage,
+				ppage,
+				asid);
+		}
 
 		it = s_tlbJitPages.insert_or_assign(
 			page_key,
@@ -1494,7 +1597,7 @@ static uptr psbbnGetTlbJitTarget()
 		static u64 highTlbDispatchCount = 0;
 		const u64 id = ++highTlbDispatchCount;
 
-		if (id <= 100 || (id % 100000) == 0)
+		if (false && (id <= 100 || (id % 100000) == 0))
 		{
 			Console.Error(
 				"PSBBN TLBJITHIGH[%llu] pc=%08X ASID=%02X",
@@ -1522,7 +1625,7 @@ static void psbbnProbeRc4Schedule()
 
 	const u64 id = ++s_psbbnRc4ScheduleCount;
 
-	if (id <= 100 || (id % 1000) == 0)
+	if (false && (id <= 100 || (id % 1000) == 0))
 	{
 		Console.Error(
 			"PSBBN RC4SCHED[%llu] task=%08X "
@@ -1549,7 +1652,7 @@ static void psbbnProbeRcBnSchedule()
 
 	const u64 id = ++s_psbbnRcBnScheduleCount;
 
-	if (id <= 100 || (id % 1000) == 0)
+	if (false && (id <= 100 || (id % 1000) == 0))
 	{
 		Console.Error(
 			"PSBBN RCBNSCHED[%llu] task=%08X "
@@ -1655,7 +1758,7 @@ static void psbbnRecompileTlbBlock()
 				    const u64 cop1_count =
 				        ++cop1_delay_counts[cop1_rs][cop1_funct];
 				
-				    if ((cop1_count & (cop1_count - 1)) == 0)
+				    if (false && ((cop1_count & (cop1_count - 1)) == 0))
 				    {
 				        Console.Error(
 				            "PSBBN COP1DELAY rs=%02X funct=%02X rt=%02X "
@@ -1669,7 +1772,7 @@ static void psbbnRecompileTlbBlock()
 				    }
 				}
 				
-				if ((branch_delay_count & (branch_delay_count - 1)) == 0)
+				if (false && ((branch_delay_count & (branch_delay_count - 1)) == 0))
 				{
 				    Console.Error(
 				        "PSBBN BRANCHDELAY branchop=%02X delayop=%02X "
@@ -1685,7 +1788,7 @@ static void psbbnRecompileTlbBlock()
 				static u64 branchDelayFallbackCount = 0;
 				const u64 id = ++branchDelayFallbackCount;
 		
-				if (id <= 100 || (id % 100000) == 0)
+				if (false && (id <= 100 || (id % 100000) == 0))
 				{
 					Console.Error(
 						"PSBBN TLBJITBRANCHFALLBACK[%llu] "
@@ -1751,13 +1854,31 @@ static void psbbnRecompileTlbBlock()
 		    const u32 cop1_rs = (fallback_code >> 21) & 0x1f;
 		    const u32 cop1_rt = (fallback_code >> 16) & 0x1f;
 		    const u32 cop1_funct = fallback_code & 0x3f;
-		
+
+			if (cop1_rs == 0x08) // BC1 branch group
+			{
+			    static u64 bc1_fallback_counts[32] = {};
+			
+			    const u64 bc1_count =
+			        ++bc1_fallback_counts[cop1_rt];
+			
+			    if (false && ((bc1_count & (bc1_count - 1)) == 0))
+			    {
+			        Console.Error(
+			            "PSBBN BC1FALLBACK rt=%02X count=%llu pc=%08X code=%08X",
+			            cop1_rt,
+			            bc1_count,
+			            startpc,
+			            fallback_code);
+			    }
+			}
+			
 		    static u64 cop1_fallback_counts[32][64] = {};
 		
 		    const u64 cop1_count =
 		        ++cop1_fallback_counts[cop1_rs][cop1_funct];
 		
-		    if ((cop1_count & (cop1_count - 1)) == 0)
+		    if (false && ((cop1_count & (cop1_count - 1)) == 0))
 		    {
 		        Console.Error(
 		            "PSBBN COP1FALLBACK rs=%02X funct=%02X rt=%02X "
@@ -1778,7 +1899,7 @@ static void psbbnRecompileTlbBlock()
 		
 		// Log at 1, 2, 4, 8, 16, 32... occurrences.
 		// This gives us frequency information without flooding the log.
-		if ((fallback_count & (fallback_count - 1)) == 0)
+		if (false && ((fallback_count & (fallback_count - 1)) == 0))
 		{
 		    Console.Error(
 		        "PSBBN FALLBACK op=%02X count=%llu pc=%08X code=%08X "
@@ -1798,7 +1919,7 @@ static void psbbnRecompileTlbBlock()
 		const u32 code =
 			tlbJitReadCode(startpc, vpage, ppage);
 
-		if (id <= 100 || (id % 100000) == 0)
+		if (false && (id <= 100 || (id % 100000) == 0))
 		{
 			Console.Error(
 				"PSBBN TLBJITFALLBACK[%llu] vpc=%08X ppc=%08X code=%08X op=%02X",
@@ -1953,7 +2074,7 @@ static void psbbnRecompileTlbBlock()
 	static u64 tlbBlockCompileCount = 0;
 	const u64 id = ++tlbBlockCompileCount;
 
-	if (id <= 100 || (id % 5000) == 0)
+	if (false && (id <= 100 || (id % 5000) == 0))
 	{
 		Console.Error(
 			"PSBBN TLBJITBLOCK[%llu] vpc=%08X ppc=%08X insts=%u end=%08X host=%p",
@@ -1983,9 +2104,12 @@ static void psbbnProbeUnmappedRecLUT(u32 vpc)
 	const u32 region = vpc & 0xFFFF0000u;
 	const u32 currentASID = cpuRegs.CP0.n.EntryHi & 0xff;
 
-	Console.Error(
-		"PSBBN RECLUT[%03d] pc=%08X region=%08X ASID=%02X",
-		id, vpc, region, currentASID);
+	if (false && false)
+	{
+		Console.Error(
+			"PSBBN RECLUT[%03d] pc=%08X region=%08X ASID=%02X",
+			id, vpc, region, currentASID);
+	}
 
 	for (u32 offset = 0; offset < 0x10000; offset += 0x1000)
 	{
@@ -2025,24 +2149,27 @@ static void psbbnProbeUnmappedRecLUT(u32 vpc)
 			break;
 		}
 
-		if (foundSlot >= 0)
+		if (false && false)
 		{
-			Console.Error(
-				"PSBBN RECLUTPAGE[%03d] va=%08X slot=%02d "
-				"valid=%u dirty=%u global=%u pa=%08X",
-				id,
-				vaddr,
-				foundSlot,
-				valid ? 1u : 0u,
-				dirty ? 1u : 0u,
-				global ? 1u : 0u,
-				paddr);
-		}
-		else
-		{
-			Console.Error(
-				"PSBBN RECLUTPAGE[%03d] va=%08X slot=NONE",
-				id, vaddr);
+			if (foundSlot >= 0)
+			{
+				Console.Error(
+					"PSBBN RECLUTPAGE[%03d] va=%08X slot=%02d "
+					"valid=%u dirty=%u global=%u pa=%08X",
+					id,
+					vaddr,
+					foundSlot,
+					valid ? 1u : 0u,
+					dirty ? 1u : 0u,
+					global ? 1u : 0u,
+					paddr);
+			}
+			else
+			{
+				Console.Error(
+					"PSBBN RECLUTPAGE[%03d] va=%08X slot=NONE",
+					id, vaddr);
+			}
 		}
 	}
 }
