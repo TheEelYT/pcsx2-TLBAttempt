@@ -6,6 +6,7 @@
 #include "VMManager.h"
 #include "Elfheader.h"
 #include "Cache.h"
+#include "vtlb.h"
 
 #include "DebugTools/Breakpoints.h"
 
@@ -150,6 +151,17 @@ void intCheckMemcheck()
 	}
 }
 
+static __fi const R5900::OPCODE& ps2LinuxGetInstruction(u32 code)
+{
+    const R5900::OPCODE& opcode =
+        R5900::OpcodeTables::tbl_Standard[code >> 26];
+
+    if (!opcode.getsubclass)
+        return opcode;
+
+    return R5900::GetInstruction(code);
+}
+
 static void execI()
 {
 	// execI is called for every instruction so it must remains as light as possible.
@@ -174,66 +186,15 @@ static void execI()
 	cpuRegs.pc += 4;
 
 	// interprete instruction
-	cpuRegs.code = memRead32( pc );
+	cpuRegs.code =
+	    EmuConfig.Cpu.Recompiler.EnablePS2Linux ?
+	        vtlb_PS2LinuxFetch32(pc) :
+	        memRead32(pc);
 
-	// Temporary PSBBN userspace execution trace.
-	// Arm at the call near the eventual MOD fault and record the actual
-	// interpreter execution stream until the faulting instruction is reached.
-	static bool psbbnUserTraceArmed = false;
-	static bool psbbnUserTraceDone = false;
-	static int psbbnUserTraceCount = 0;
-
-	if (!psbbnUserTraceDone &&
-		!psbbnUserTraceArmed &&
-		pc == 0x0FB64BDCu)
-	{
-		psbbnUserTraceArmed = true;
-		psbbnUserTraceCount = 0;
-		Console.Error("PSBBN UTRACE START");
-	}
-
-	if (psbbnUserTraceArmed &&
-		pc >= 0x0FB60000u &&
-		pc <  0x0FB7A000u)
-	{
-	const int id = ++psbbnUserTraceCount;
-
-		Console.Error(
-			"PSBBN UTRACE[%04d] pc=%08X code=%08X "
-			"v0=%08X a0=%08X t0=%08X "
-			"s0=%08X s1=%08X "
-			"t9=%08X gp=%08X sp=%08X ra=%08X "
-			"branch=%u delay=%u",
-			id,
-			pc,
-			cpuRegs.code,
-			cpuRegs.GPR.r[2].UL[0],   // v0
-			cpuRegs.GPR.r[4].UL[0],   // a0
-			cpuRegs.GPR.r[8].UL[0],   // t0
-			cpuRegs.GPR.r[16].UL[0],  // s0
-			cpuRegs.GPR.r[17].UL[0],  // s1
-			cpuRegs.GPR.r[25].UL[0],  // t9
-			cpuRegs.GPR.r[28].UL[0],  // gp
-			cpuRegs.GPR.r[29].UL[0],  // sp
-			cpuRegs.GPR.r[31].UL[0],  // ra
-			static_cast<unsigned>(cpuRegs.branch),
-			static_cast<unsigned>(cpuRegs.IsDelaySlot));
-
-		if (pc == 0x0FB64BF8u)
-		{
-			Console.Error("PSBBN UTRACE END at fault instruction");
-			psbbnUserTraceArmed = false;
-			psbbnUserTraceDone = true;
-		}
-		else if (psbbnUserTraceCount >= 32768)
-		{
-			Console.Error("PSBBN UTRACE END: instruction limit reached");
-			psbbnUserTraceArmed = false;
-			psbbnUserTraceDone = true;
-		}
-	}
-
-	const OPCODE& opcode = GetCurrentInstruction();
+	const OPCODE& opcode =
+	    EmuConfig.Cpu.Recompiler.EnablePS2Linux ?
+	        ps2LinuxGetInstruction(cpuRegs.code) :
+	        GetCurrentInstruction();
 #if 0
 	static long int runs = 0;
 	//use this to find out what opcodes your game uses. very slow! (rama)
@@ -612,16 +573,31 @@ static void intReset()
 
 void intEventTest()
 {
-	// Perform counters, ints, and IOP updates:
-	_cpuEventTest_Shared();
+    // PS2 Linux uses branch-heavy workloads which make the interpreter
+    // call the full shared event machinery extremely frequently.
+    //
+    // nextEventCycle already represents the earliest cycle at which
+    // scheduled EE/IOP/counter/interrupt work needs processing.
+    //
+    // Leave the normal PCSX2 interpreter behavior completely unchanged
+    // unless the experimental PS2 Linux mode is enabled.
+    if (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+        !intExitExecution &&
+        static_cast<s64>(cpuRegs.cycle - cpuRegs.nextEventCycle) < 0)
+    {
+        return;
+    }
 
-	if (intExitExecution)
-	{
-		intExitExecution = false;
-		if (CHECK_EEREC)
-			writebackCache();
-		fastjmp_jmp(&intJmpBuf, 1);
-	}
+    // Perform counters, ints, and IOP updates:
+    _cpuEventTest_Shared();
+
+    if (intExitExecution)
+    {
+        intExitExecution = false;
+        if (CHECK_EEREC)
+            writebackCache();
+        fastjmp_jmp(&intJmpBuf, 1);
+    }
 }
 
 static void intSafeExitExecution()

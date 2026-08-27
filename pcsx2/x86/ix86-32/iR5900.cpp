@@ -114,8 +114,6 @@ static bool s_tlbJitCompiling = false;
 static u32 s_tlbJitCompileVPage = 0;
 static u32 s_tlbJitCompilePPage = 0;
 
-static u32 s_psbbnSparseRecCallCounts[64] = {};
-
 static __fi int* tlbJitCodePtr(u32 vaddr)
 {
 	u32 addr = vaddr;
@@ -158,6 +156,7 @@ static void iBranchTest(u32 newpc = 0xffffffff);
 static void ClearRecLUT(BASEBLOCK* base, int count);
 static u32 scaleblockcycles();
 static void recExitExecution();
+
 
 #ifdef TRACE_BLOCKS
 static void pauseAAA()
@@ -428,56 +427,59 @@ void recBranchCall(void (*func)())
 
 void recCall(void (*func)())
 {
-	iFlushCall(FLUSH_INTERPRETER);
+    iFlushCall(FLUSH_INTERPRETER);
 
-	if (s_tlbJitCompiling)
-	{
-	    const u32 op = cpuRegs.code >> 26;
-	
-	    xADD(
-	        ptr32[&s_psbbnSparseRecCallCounts[op]],
-	        1);
-	}
-	
-	// Temporary TLB-JIT correctness bridge for interpreter-backed
-	// instructions in a branch delay slot.
-	//
-	// cpuTlbMiss() expects the interpreter PC to have already advanced
-	// past the faulting instruction. For a delay-slot fault we also need
-	// cpuRegs.branch=1 so cpuException() sets EPC to the branch and BD=1.
-	if (s_tlbJitCompiling && g_recompilingDelaySlot)
-	{
-	    const u32 expected_pc = pc + 4;
-	
-	    xMOV(ptr32[&cpuRegs.pc], expected_pc);
-	    xMOV(ptr32[&cpuRegs.branch], 1);
-	
-	    xFastCall((void*)func);
-	
-	    // cpuException() has already consumed branch=1 if the
-	    // interpreter-backed delay-slot instruction faulted.
-	    xMOV(ptr32[&cpuRegs.branch], 0);
-	
-	    // Normal memory instruction:
-	    //     cpuRegs.pc is still expected_pc.
-	    //
-	    // Guest exception:
-	    //     cpuException() replaced cpuRegs.pc with the exception vector.
-	    //
-	    // In the exception case, dispatch immediately using the runtime PC
-	    // instead of letting the native branch code overwrite it.
-	    xCMP(ptr32[&cpuRegs.pc], expected_pc);
-	    xForwardJE32 no_exception;
-	
-	    iBranchTest(0xffffffff);
-	
-	    no_exception.SetTarget();
-	}
-	else
-	{
-	    xFastCall((void*)func);
-	}
-	
+	const u32 sparse_op = cpuRegs.code >> 26;
+
+	const bool sparse_continue_memory =
+		s_tlbJitCompiling &&
+		!g_recompilingDelaySlot &&
+		(sparse_op == 35 || // LW
+		 sparse_op == 43);  // SW
+
+    if (sparse_continue_memory)
+    {
+        // For a normal instruction, recompileNextInstruction() has
+        // already advanced compile-time pc by 4 before recCall().
+        const u32 expected_pc = pc;
+
+        // iFlushCall(FLUSH_INTERPRETER) already emitted cpuRegs.pc = pc.
+
+        xFastCall((void*)func);
+
+        // Success: interpreter leaves cpuRegs.pc == expected_pc.
+        // TLB exception: cpuException() replaces it with an exception vector.
+        xCMP(ptr32[&cpuRegs.pc], expected_pc);
+        xForwardJE32 no_exception;
+
+        iBranchTest(0xffffffff);
+
+        no_exception.SetTarget();
+    }
+    else if (s_tlbJitCompiling && g_recompilingDelaySlot)
+    {
+        // Delay-slot compilation intentionally keeps pc pointing at
+        // the branch, so +4 is correct here.
+        const u32 expected_pc = pc + 4;
+
+        xMOV(ptr32[&cpuRegs.pc], expected_pc);
+        xMOV(ptr32[&cpuRegs.branch], 1);
+
+        xFastCall((void*)func);
+
+        xMOV(ptr32[&cpuRegs.branch], 0);
+
+        xCMP(ptr32[&cpuRegs.pc], expected_pc);
+        xForwardJE32 no_exception;
+
+        iBranchTest(0xffffffff);
+
+        no_exception.SetTarget();
+    }
+    else
+    {
+        xFastCall((void*)func);
+    }
 }
 
 // =====================================================================================================
@@ -496,6 +498,9 @@ static const void* DispatcherEvent = nullptr;
 static const void* DispatcherReg = nullptr;
 static const void* JITCompile = nullptr;
 static const void* TlbJITCompile = nullptr;
+
+static const void* TlbJITFallback = nullptr;
+
 static const void* EnterRecompiledCode = nullptr;
 static const void* DispatchBlockDiscard = nullptr;
 static const void* DispatchPageReset = nullptr;
@@ -533,6 +538,20 @@ static const void* _DynGen_JITCompile()
 	xJMP(ptrNative[rdx * (wordsize / 4) + rcx]);
 
 	return retval;
+}
+
+static const void* _DynGen_TlbJITFallback()
+{
+    u8* retval = xGetAlignedCallTarget();
+
+    xFastCall((const void*)psbbnTlbJitFallback);
+
+    // psbbnTlbJitFallback() normally exits through fastjmp,
+    // so this should never execute. Keep a valid escape path
+    // in case that ever changes.
+    xJMP(DispatcherReg);
+
+    return retval;
 }
 
 static const void* _DynGen_TlbJITCompile()
@@ -820,15 +839,9 @@ static bool tlbJitCanCompileDelaySlot(u32 code)
 // called when jumping to variable pc address
 static const void* _DynGen_DispatcherReg()
 {
-	u8* retval = xGetPtr();
+    u8* retval = xGetPtr();
 
-	// Ask the 4K TLB-JIT dispatcher whether this PC needs a
-	// TLB-aware block.
-	//
-	// Return value:
-	//   0     = use the normal recLUT dispatcher
-	//   other = native host target for this TLB-mapped instruction
-	xFastCall((const void*)psbbnGetTlbJitTarget);
+    xFastCall((const void*)psbbnGetTlbJitTarget);
 
 	xTEST(rax, rax);
 	xForwardJZ32 normal_dispatch;
@@ -919,9 +932,11 @@ static void _DynGen_Dispatchers()
 	// most and stand to benefit from strong alignment and direct referencing.
 	DispatcherEvent = _DynGen_DispatcherEvent();
 	DispatcherReg = _DynGen_DispatcherReg();
-
 	JITCompile = _DynGen_JITCompile();
 	TlbJITCompile = _DynGen_TlbJITCompile();
+
+	TlbJITFallback = _DynGen_TlbJITFallback();
+
 	EnterRecompiledCode = _DynGen_EnterRecompiledCode();
 	DispatchBlockDiscard = _DynGen_DispatchBlockDiscard();
 	DispatchPageReset = _DynGen_DispatchPageReset();
@@ -938,40 +953,119 @@ static void _DynGen_Dispatchers()
 
 static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut)
 {
-	const u32 currentASID = cpuRegs.CP0.n.EntryHi & 0xff;
+    const u32 currentASID = cpuRegs.CP0.n.EntryHi & 0xff;
+    const u32 vpage = vaddr & ~0xFFFu;
 
-	for (int t = 0; t < 48; t++)
-	{
-		const u32 pageSize = (tlb[t].Mask() + 1) << 12;
-		const u32 base = tlb[t].VPN2();
+    // Hot-path cache: execution normally performs many sparse block
+    // dispatches within the same 4K virtual page. Remember which EE
+    // TLB slot matched that page so we don't rescan all 48 entries.
+    //
+    // We still validate the actual slot contents every time, so a
+    // TLBWI/TLBWR changing that slot cannot leave us using stale data.
+    static u32 cachedVPage = 0xFFFFFFFFu;
+    static u32 cachedASID = 0xFFFFFFFFu;
+    static int cachedSlot = -1;
 
-		if (vaddr < base || vaddr >= base + pageSize * 2)
-			continue;
+    if (cachedSlot >= 0 &&
+        cachedVPage == vpage &&
+        cachedASID == currentASID)
+    {
+        const tlbs& t = tlb[cachedSlot];
 
-		if (!tlb[t].isGlobal() && tlb[t].EntryHi.ASID != currentASID)
-			continue;
+        const u32 pageSize =
+            (t.Mask() + 1) << 12;
 
-		const bool odd = (vaddr - base) >= pageSize;
-		const EntryLo_t& lo = odd ? tlb[t].EntryLo1 : tlb[t].EntryLo0;
+        const u32 base = t.VPN2();
 
-		*validOut = lo.V;
+        if (vaddr >= base &&
+            vaddr < base + pageSize * 2 &&
+            (t.isGlobal() ||
+             t.EntryHi.ASID == currentASID))
+        {
+            const bool odd =
+                (vaddr - base) >= pageSize;
 
-		if (lo.V)
-		{
-			const u32 pfn = odd ? tlb[t].PFN1() : tlb[t].PFN0();
-			*paddrOut = pfn + ((vaddr - base) & (pageSize - 1));
-		}
-		else
-		{
-			*paddrOut = 0;
-		}
+            const EntryLo_t& lo =
+                odd ? t.EntryLo1 : t.EntryLo0;
 
-		return true;
-	}
+            *validOut = lo.V;
 
-	*validOut = false;
-	*paddrOut = 0;
-	return false;
+            if (lo.V)
+            {
+                const u32 pfn =
+                    odd ? t.PFN1() : t.PFN0();
+
+                *paddrOut =
+                    pfn +
+                    ((vaddr - base) &
+                     (pageSize - 1));
+            }
+            else
+            {
+                *paddrOut = 0;
+            }
+
+            return true;
+        }
+
+        // The remembered slot changed underneath us.
+        cachedSlot = -1;
+    }
+
+    for (int t = 0; t < 48; t++)
+    {
+        const u32 pageSize =
+            (tlb[t].Mask() + 1) << 12;
+
+        const u32 base = tlb[t].VPN2();
+
+        if (vaddr < base ||
+            vaddr >= base + pageSize * 2)
+        {
+            continue;
+        }
+
+        if (!tlb[t].isGlobal() &&
+            tlb[t].EntryHi.ASID != currentASID)
+        {
+            continue;
+        }
+
+        // Remember this slot for subsequent dispatches from the
+        // same 4K virtual page.
+        cachedVPage = vpage;
+        cachedASID = currentASID;
+        cachedSlot = t;
+
+        const bool odd =
+            (vaddr - base) >= pageSize;
+
+        const EntryLo_t& lo =
+            odd ? tlb[t].EntryLo1 : tlb[t].EntryLo0;
+
+        *validOut = lo.V;
+
+        if (lo.V)
+        {
+            const u32 pfn =
+                odd ? tlb[t].PFN1() : tlb[t].PFN0();
+
+            *paddrOut =
+                pfn +
+                ((vaddr - base) &
+                 (pageSize - 1));
+        }
+        else
+        {
+            *paddrOut = 0;
+        }
+
+        return true;
+    }
+
+    *validOut = false;
+    *paddrOut = 0;
+    return false;
 }
 
 static bool psbbnReadGuestByte(u32 vaddr, u8* out)
@@ -1115,55 +1209,6 @@ static void psbbnProbeExec()
 		filename_ptr,
 		filename,
 		sizeof(filename));
-
-	static bool dumped_sparse_rec_calls = false;
-	
-	if (!dumped_sparse_rec_calls &&
-	    std::strcmp(filename, "/sbin/pidof") == 0)
-	{
-	    dumped_sparse_rec_calls = true;
-	
-	    Console.Error(
-	        "PSBBN MEMRUNTIME "
-	        "LDL=%u LDR=%u LQ=%u SQ=%u "
-	        "LB=%u LH=%u LWL=%u LW=%u "
-	        "LBU=%u LHU=%u LWR=%u LWU=%u "
-	        "SB=%u SH=%u SWL=%u SW=%u "
-	        "SDL=%u SDR=%u SWR=%u "
-	        "LWC1=%u LQC2=%u LD=%u "
-	        "SWC1=%u SQC2=%u SD=%u",
-	        s_psbbnSparseRecCallCounts[26],
-	        s_psbbnSparseRecCallCounts[27],
-	        s_psbbnSparseRecCallCounts[30],
-	        s_psbbnSparseRecCallCounts[31],
-	
-	        s_psbbnSparseRecCallCounts[32],
-	        s_psbbnSparseRecCallCounts[33],
-	        s_psbbnSparseRecCallCounts[34],
-	        s_psbbnSparseRecCallCounts[35],
-	
-	        s_psbbnSparseRecCallCounts[36],
-	        s_psbbnSparseRecCallCounts[37],
-	        s_psbbnSparseRecCallCounts[38],
-	        s_psbbnSparseRecCallCounts[39],
-	
-	        s_psbbnSparseRecCallCounts[40],
-	        s_psbbnSparseRecCallCounts[41],
-	        s_psbbnSparseRecCallCounts[42],
-	        s_psbbnSparseRecCallCounts[43],
-	
-	        s_psbbnSparseRecCallCounts[44],
-	        s_psbbnSparseRecCallCounts[45],
-	        s_psbbnSparseRecCallCounts[46],
-	
-	        s_psbbnSparseRecCallCounts[49],
-	        s_psbbnSparseRecCallCounts[54],
-	        s_psbbnSparseRecCallCounts[55],
-	
-	        s_psbbnSparseRecCallCounts[57],
-	        s_psbbnSparseRecCallCounts[62],
-	        s_psbbnSparseRecCallCounts[63]);
-	}
 
 	if (std::strcmp(filename, "/etc/rc.d/rc.4") == 0)
 	{
@@ -1568,7 +1613,7 @@ static uptr psbbnGetTlbJitTarget()
 		it->second->virtual_page != vpage ||
 		it->second->physical_page != ppage ||
 		it->second->asid != asid)
-		{
+	{
 		auto page = std::make_unique<TlbJitPage>();
 
 		page->virtual_page = vpage;
@@ -1605,7 +1650,7 @@ static uptr psbbnGetTlbJitTarget()
 				vpc,
 				cpuRegs.CP0.n.EntryHi & 0xFF);
 		}
-}
+	}
 
 	TlbJitPage& page = *it->second;
 	const u32 slot = (vpc & 0xFFFu) >> 2;
@@ -1831,6 +1876,13 @@ static void psbbnRecompileTlbBlock()
 		{
 		    endpc += 4;
 		    instruction_count++;
+
+		    if (op == 35 || // LW
+	            op == 43)   // SW
+	        {
+	            continue;
+	        }
+
 		    break;
 		}		
 
@@ -1844,6 +1896,9 @@ static void psbbnRecompileTlbBlock()
 	// First instruction itself is something we don't trust natively yet.
 	if (instruction_count == 0)
 	{
+		page.blocks[slot].SetFnptr(
+		    reinterpret_cast<uptr>(TlbJITFallback));
+
 		const u32 fallback_code =
 		    tlbJitReadCode(startpc, vpage, ppage);
 		
@@ -2524,7 +2579,9 @@ static void recResetRaw()
 		memset(s_pInstCache, 0, sizeof(EEINST) * s_nInstCacheSize);
 
 	recBlocks.Reset();
+
 	s_tlbJitPages.clear();
+
 	vtlb_ClearLoadStoreInfo();
 
 	g_branch = 0;
@@ -3331,15 +3388,15 @@ static void iBranchTest(u32 newpc)
 		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
 
 		if (newpc == 0xffffffff ||
-			newpc == 0x80065B78u || // Temporary: force do_execve through DispatcherReg
-			newpc < 0x80000000u ||
-			newpc >= 0xC0000000u)
+		    newpc == 0x80065B78u ||
+		    newpc < 0x80000000u ||
+		    newpc >= 0xC0000000u)
 		{
-			xJS(DispatcherReg);
+		    xJS(DispatcherReg);
 		}
 		else
 		{
-			recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
+		    recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
 		}
 		xJMP((void*)DispatcherEvent);
 	}

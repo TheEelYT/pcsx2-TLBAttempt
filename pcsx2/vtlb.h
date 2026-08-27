@@ -59,6 +59,9 @@ extern void vtlb_ReassignHandler( vtlbHandler rv,
 	vtlbMemW8FP* w8,vtlbMemW16FP* w16,vtlbMemW32FP* w32,vtlbMemW64FP* w64,vtlbMemW128FP* w128
 );
 
+void psbbnInvalidateWriteProtCache();
+
+extern mem32_t vtlb_PS2LinuxFetch32(u32 addr);
 
 extern void vtlb_MapHandler(vtlbHandler handler,u32 start,u32 size);
 extern void vtlb_MapBlock(void* base,u32 start,u32 size,u32 blocksize=0);

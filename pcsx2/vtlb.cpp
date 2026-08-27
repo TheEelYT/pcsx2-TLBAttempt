@@ -35,6 +35,7 @@
 #include <map>
 #include <unordered_set>
 #include <unordered_map>
+#include <array>
 
 #define FASTMEM_LOG(...)
 //#define FASTMEM_LOG(...) Console.WriteLn(__VA_ARGS__)
@@ -55,6 +56,35 @@ static vtlbHandler DefaultPhyHandler;
 static vtlbHandler UnmappedVirtHandler;
 static vtlbHandler WriteProtectedVirtHandler;
 static vtlbHandler UnmappedPhyHandler;
+
+static bool vtlb_WriteProtectedPAddr(u32 vaddr, u32* paddr);
+struct PS2LinuxFetchCacheEntry
+{
+    u32 page = 0xFFFFFFFFu;
+    uptr host_page = 0;
+};
+
+static PS2LinuxFetchCacheEntry s_ps2LinuxFetchCache[64];
+
+static void ps2LinuxInvalidateFetchCache(u32 vaddr, u32 size)
+{
+    if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+        return;
+
+    const u64 start = vaddr;
+    const u64 end = static_cast<u64>(vaddr) + size;
+
+    for (PS2LinuxFetchCacheEntry& entry : s_ps2LinuxFetchCache)
+    {
+        if (entry.page != 0xFFFFFFFFu &&
+            static_cast<u64>(entry.page) >= start &&
+            static_cast<u64>(entry.page) < end)
+        {
+            entry.page = 0xFFFFFFFFu;
+            entry.host_page = 0;
+        }
+    }
+}
 
 struct FastmemVirtualMapping
 {
@@ -161,6 +191,57 @@ __inline int CheckCache(u32 addr)
 // Interpreter Implementations of VTLB Memory Operations.
 // --------------------------------------------------------------------------------------
 // See recVTLB.cpp for the dynarec versions.
+mem32_t vtlb_PS2LinuxFetch32(u32 addr)
+{
+    if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+        return vtlb_memRead<mem32_t>(addr);
+
+    if (!CHECK_EEREC && CHECK_CACHE)
+        return vtlb_memRead<mem32_t>(addr);
+
+    const u32 page = addr & ~VTLB_PAGE_MASK;
+    const u32 page_index = addr >> VTLB_PAGE_BITS;
+
+    PS2LinuxFetchCacheEntry& entry =
+        s_ps2LinuxFetchCache[page_index & 63u];
+
+    if (entry.page != page)
+    {
+        const VTLBVirtual vmv =
+            vtlbdata.vmap[page_index];
+
+        entry.page = page;
+        entry.host_page = 0;
+
+        if (!vmv.isHandler(addr))
+        {
+            entry.host_page = vmv.assumePtr(page);
+        }
+        else if (vmv.assumeHandlerGetID() ==
+                 WriteProtectedVirtHandler)
+        {
+            u32 paddr = 0;
+
+            if (vtlb_WriteProtectedPAddr(page, &paddr))
+            {
+                void* ptr = vtlb_GetPhyPtr(paddr);
+
+                if (ptr)
+                    entry.host_page =
+                        reinterpret_cast<uptr>(ptr);
+            }
+        }
+    }
+
+    if (entry.host_page)
+    {
+        return *reinterpret_cast<const mem32_t*>(
+            entry.host_page +
+            (addr & VTLB_PAGE_MASK));
+    }
+
+    return vtlb_memRead<mem32_t>(addr);
+}
 
 template <typename DataType>
 DataType vtlb_memRead(u32 addr)
@@ -659,34 +740,93 @@ static __ri void vtlb_Modified(u32 addr)
 	Cpu->CancelInstruction();
 }
 
+struct PsbbnWriteProtCacheEntry
+{
+    u32 vpage = 0;
+    u32 ppage = 0;
+    u32 generation = 0;
+    u8 asid = 0;
+};
+
+static constexpr u32 PSBBN_WP_CACHE_SIZE = 4096;
+static std::array<PsbbnWriteProtCacheEntry, PSBBN_WP_CACHE_SIZE> s_psbbnWriteProtCache{};
+static u32 s_psbbnWriteProtGeneration = 1;
+
+void psbbnInvalidateWriteProtCache()
+{
+    s_psbbnWriteProtGeneration++;
+
+    if (s_psbbnWriteProtGeneration == 0)
+    {
+        s_psbbnWriteProtGeneration = 1;
+
+        for (auto& entry : s_psbbnWriteProtCache)
+            entry.generation = 0;
+    }
+}
+
 // These pages are mapped vaddr->vaddr so the handler is given the virtual
 // address, which the exception needs; the physical side is resolved here.
 static bool vtlb_WriteProtectedPAddr(u32 vaddr, u32* paddr)
 {
-	for (int i = 0; i < 48; i++)
-	{
-		const u32 pageSize = (tlb[i].Mask() + 1) << 12;
-		const u32 base = tlb[i].VPN2();
+    const u32 vpage = vaddr & ~0xFFFu;
+    const u32 page_offset = vaddr & 0xFFFu;
+    const u8 asid = cpuRegs.CP0.n.EntryHi & 0xff;
 
-		if (vaddr < base || vaddr >= base + pageSize * 2)
-			continue;
-		if (!tlb[i].isGlobal() && (tlb[i].EntryHi.ASID != (cpuRegs.CP0.n.EntryHi & 0xff)))
-			continue;
+    const u32 cache_index =
+        ((vpage >> 12) ^ asid) &
+        (PSBBN_WP_CACHE_SIZE - 1);
 
-		const bool odd = (vaddr - base) >= pageSize;
-		const EntryLo_t& lo = odd ? tlb[i].EntryLo1 : tlb[i].EntryLo0;
-		if (!lo.V)
-			return false;
+    PsbbnWriteProtCacheEntry& cached =
+        s_psbbnWriteProtCache[cache_index];
 
-		const u32 resolved_paddr =
-			(odd ? tlb[i].PFN1() : tlb[i].PFN0()) + ((vaddr - base) & (pageSize - 1));
-		if (resolved_paddr >= VTLB_PMAP_SZ)
-			return false;
+    if (cached.generation == s_psbbnWriteProtGeneration &&
+        cached.vpage == vpage &&
+        cached.asid == asid)
+    {
+        *paddr = cached.ppage | page_offset;
+        return true;
+    }
 
-		*paddr = resolved_paddr;
-		return true;
-	}
-	return false;
+    for (int i = 0; i < 48; i++)
+    {
+        const u32 pageSize = (tlb[i].Mask() + 1) << 12;
+        const u32 base = tlb[i].VPN2();
+
+        if (vaddr < base || vaddr >= base + pageSize * 2)
+            continue;
+
+        if (!tlb[i].isGlobal() &&
+            tlb[i].EntryHi.ASID != asid)
+        {
+            continue;
+        }
+
+        const bool odd = (vaddr - base) >= pageSize;
+        const EntryLo_t& lo =
+            odd ? tlb[i].EntryLo1 : tlb[i].EntryLo0;
+
+        if (!lo.V)
+            return false;
+
+        const u32 resolved_paddr =
+            (odd ? tlb[i].PFN1() : tlb[i].PFN0()) +
+            ((vaddr - base) & (pageSize - 1));
+
+        if (resolved_paddr >= VTLB_PMAP_SZ)
+            return false;
+
+        // Cache the 4K physical page containing this address.
+        cached.vpage = vpage;
+        cached.ppage = resolved_paddr & ~0xFFFu;
+        cached.asid = asid;
+        cached.generation = s_psbbnWriteProtGeneration;
+
+        *paddr = resolved_paddr;
+        return true;
+    }
+
+    return false;
 }
 
 template <typename OperandType>
@@ -1285,6 +1425,9 @@ bool vtlb_IsFaultingPC(u32 guest_pc)
 //TODO: Add invalid paddr checks
 void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 {
+	if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+	    ps2LinuxInvalidateFetchCache(vaddr, size);
+
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (paddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
@@ -1329,6 +1472,9 @@ void vtlb_VMap(u32 vaddr, u32 paddr, u32 size)
 
 void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 {
+	if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+	    ps2LinuxInvalidateFetchCache(vaddr, size);
+
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
 
@@ -1360,6 +1506,9 @@ void vtlb_VMapBuffer(u32 vaddr, void* buffer, u32 size)
 
 void vtlb_VMapWriteProtected(u32 vaddr, u32 size)
 {
+	if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+	    ps2LinuxInvalidateFetchCache(vaddr, size);
+
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
 
@@ -1378,6 +1527,9 @@ void vtlb_VMapWriteProtected(u32 vaddr, u32 size)
 
 void vtlb_VMapUnmap(u32 vaddr, u32 size)
 {
+	if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+	    ps2LinuxInvalidateFetchCache(vaddr, size);
+
 	verify(0 == (vaddr & VTLB_PAGE_MASK));
 	verify(0 == (size & VTLB_PAGE_MASK) && size > 0);
 

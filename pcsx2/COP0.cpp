@@ -3,6 +3,7 @@
 
 #include "Common.h"
 #include "COP0.h"
+#include "vtlb.h"
 
 
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
@@ -233,6 +234,8 @@ __fi void COP0_UpdatePCCR()
 // Linux's flush loops put the ASID of whichever mm they are flushing into it.
 static u32 tlbInstalledASID = 0;
 
+static bool s_psbbnAsidRemap = false;
+
 static bool tlbSlotIsInstalled(const tlbs& t)
 {
 	return t.isGlobal() || (t.EntryHi.ASID == tlbInstalledASID);
@@ -241,7 +244,6 @@ static bool tlbSlotIsInstalled(const tlbs& t)
 // Temporary PSBBN TLB state probe. Logging only; no emulation behavior changes.
 static int psbbnTlbStateTraceCount = 0;
 static int psbbnTlbCacheWarnCount = 0;
-static int psbbnTlbAsidTraceCount = 0;
 
 static bool psbbnTlbTouchesRegion(const tlbs& t)
 {
@@ -261,15 +263,6 @@ static tlbs psbbnIncomingTlb()
 	return t;
 }
 
-static bool psbbnAnyInterestingTlbSlot()
-{
-	for (int i = 0; i < 48; i++)
-	{
-		if (psbbnTlbTouchesRegion(tlb[i]))
-			return true;
-	}
-	return false;
-}
 
 static void psbbnCheckCachedTlbCount(const char* op, u32 index)
 {
@@ -355,7 +348,8 @@ void MapTLB(const tlbs& t, int i)
 						memSetPageAddr(addr << 12, t.PFN0() + ((addr - saddr) << 12));
 					else
 						memSetPageAddrReadOnly(addr << 12);
-					Cpu->Clear(addr << 12, 0x400);
+					if (!s_psbbnAsidRemap)
+					    Cpu->Clear(addr << 12, 0x400);
 				}
 			}
 		}
@@ -375,7 +369,8 @@ void MapTLB(const tlbs& t, int i)
 						memSetPageAddr(addr << 12, t.PFN1() + ((addr - saddr) << 12));
 					else
 						memSetPageAddrReadOnly(addr << 12);
-					Cpu->Clear(addr << 12, 0x400);
+					if (!s_psbbnAsidRemap)
+					    Cpu->Clear(addr << 12, 0x400);
 				}
 			}
 		}
@@ -394,7 +389,7 @@ __inline u32 ConvertPageMask(const u32 PageMask)
 void UnmapTLB(const tlbs& t, int i)
 {
 	if (!tlbSlotIsInstalled(t))
-		return;
+	    return;
 
 	//Console.WriteLn("Clear TLB %d: %08x-> [%08x %08x] S=%d G=%d ASID=%d Mask= %03X", i,t.VPN2,t.PFN0,t.PFN1,t.S,t.G,t.ASID,t.Mask);
 	u32 mask, addr;
@@ -417,7 +412,8 @@ void UnmapTLB(const tlbs& t, int i)
 			if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 			{ //match
 				memClearPageAddr(addr << 12);
-				Cpu->Clear(addr << 12, 0x400);
+				if (!s_psbbnAsidRemap)
+				    Cpu->Clear(addr << 12, 0x400);
 			}
 		}
 	}
@@ -433,7 +429,8 @@ void UnmapTLB(const tlbs& t, int i)
 			if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 			{ //match
 				memClearPageAddr(addr << 12);
-				Cpu->Clear(addr << 12, 0x400);
+				if (!s_psbbnAsidRemap)
+				    Cpu->Clear(addr << 12, 0x400);
 			}
 		}
 	}
@@ -458,6 +455,8 @@ void UnmapTLB(const tlbs& t, int i)
 
 void WriteTLB(int i)
 {
+	psbbnInvalidateWriteProtCache();
+
 	tlb[i].PageMask.UL = cpuRegs.CP0.n.PageMask;
 	tlb[i].EntryHi.UL = cpuRegs.CP0.n.EntryHi;
 	tlb[i].EntryLo0.UL = cpuRegs.CP0.n.EntryLo0;
@@ -687,26 +686,21 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 				// stamping on mappings just installed.
 				const u32 newASID = cpuRegs.GPR.r[_Rt_].UL[0] & 0xff;
 
-				if (newASID != tlbInstalledASID && psbbnAnyInterestingTlbSlot() && psbbnTlbAsidTraceCount < 256)
-				{
-					const int id = ++psbbnTlbAsidTraceCount;
-					Console.Error(
-						"PSBBN TLBASID[%03d] pc=%08X code=%08X oldInstalled=%02X oldEntryHi=%08X newEntryHi=%08X newASID=%02X cached=%u",
-						id, cpuRegs.pc, cpuRegs.code, tlbInstalledASID & 0xff, cpuRegs.CP0.n.EntryHi,
-						cpuRegs.GPR.r[_Rt_].UL[0], newASID, cachedTlbs.count);
-				}
-
 				cpuRegs.CP0.n.EntryHi = cpuRegs.GPR.r[_Rt_].UL[0];
 
 				if (newASID != tlbInstalledASID)
 				{
-					for (int t = 0; t < 48; t++)
-						UnmapTLB(tlb[t], t);
+				    s_psbbnAsidRemap = true;
 
-					tlbInstalledASID = newASID;
+				    for (int t = 0; t < 48; t++)
+				        UnmapTLB(tlb[t], t);
 
-					for (int t = 0; t < 48; t++)
-						MapTLB(tlb[t], t);
+				    tlbInstalledASID = newASID;
+
+				    for (int t = 0; t < 48; t++)
+				        MapTLB(tlb[t], t);
+
+				    s_psbbnAsidRemap = false;
 				}
 				break;
 			}

@@ -655,6 +655,8 @@ struct Pcsx2Config
 		bool
 			EnableFastmem : 1;
 		bool
+		    EnablePS2Linux : 1;
+		bool
 			PauseOnTLBMiss : 1;
 		BITFIELD_END
 
