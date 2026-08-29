@@ -1782,7 +1782,7 @@ static void psbbnRecompileTlbBlock()
 	//
 	// Stop before control flow, traps, coprocessor operations, or the
 	// next TLB page. Those continue through the interpreter bridge for now.
-	static constexpr u32 MAX_TLB_BLOCK_INSTRUCTIONS = 64;
+	static constexpr u32 MAX_TLB_BLOCK_INSTRUCTIONS = 128;
 
 	u32 endpc = startpc;
 	u32 instruction_count = 0;
