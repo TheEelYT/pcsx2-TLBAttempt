@@ -110,6 +110,21 @@ struct TlbJitPage
 
 static std::unordered_map<u64, std::unique_ptr<TlbJitPage>> s_tlbJitPages;
 
+struct TlbJitFastEntry
+{
+    u64 key = ~0ull;
+    u32 physical_page = 0;
+    TlbJitPage* page = nullptr;
+};
+
+static std::array<TlbJitFastEntry, 256> s_tlbJitFastCache;
+
+static __fi u32 tlbJitFastIndex(u64 key)
+{
+    return static_cast<u32>(
+        (key ^ (key >> 20) ^ (key >> 40)) & 255u);
+}
+
 static bool s_tlbJitCompiling = false;
 static u32 s_tlbJitCompileVPage = 0;
 static u32 s_tlbJitCompilePPage = 0;
@@ -1602,39 +1617,48 @@ static uptr psbbnGetTlbJitTarget()
 	const u32 ppage = paddr & ~0xFFFu;
 	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xFF;
 	const u64 page_key =
-		(static_cast<u64>(asid) << 32) |
-		static_cast<u64>(vpage);
+	    (static_cast<u64>(asid) << 32) |
+	    static_cast<u64>(vpage);
 
-	auto it = s_tlbJitPages.find(page_key);
+	TlbJitFastEntry& fast =
+	    s_tlbJitFastCache[tlbJitFastIndex(page_key)];
+
+	TlbJitPage* page_ptr = nullptr;
 	
-	// New page, or the guest remapped this virtual page to different
-	// physical backing.
-	if (it == s_tlbJitPages.end() ||
-		it->second->virtual_page != vpage ||
-		it->second->physical_page != ppage ||
-		it->second->asid != asid)
+	if (fast.key == page_key &&
+	    fast.physical_page == ppage &&
+	    fast.page != nullptr)
 	{
-		auto page = std::make_unique<TlbJitPage>();
+	    page_ptr = fast.page;
+	}
+	else
+	{
+	    auto it = s_tlbJitPages.find(page_key);
 
-		page->virtual_page = vpage;
-		page->physical_page = ppage;
-		page->asid = static_cast<u8>(asid);
+	    if (it == s_tlbJitPages.end() ||
+	        it->second->virtual_page != vpage ||
+	        it->second->physical_page != ppage ||
+	        it->second->asid != asid)
+	    {
+	        auto page = std::make_unique<TlbJitPage>();
 
-		for (BASEBLOCK& block : page->blocks)
-			block.SetFnptr(reinterpret_cast<uptr>(TlbJITCompile));
+	        page->virtual_page = vpage;
+	        page->physical_page = ppage;
+	        page->asid = static_cast<u8>(asid);
 
-		if (false && false) 
-		{
-			Console.Error(
-				"PSBBN TLBJITPAGE vpage=%08X ppage=%08X ASID=%02X",
-				vpage,
-				ppage,
-				asid);
-		}
+	        for (BASEBLOCK& block : page->blocks)
+	            block.SetFnptr(reinterpret_cast<uptr>(TlbJITCompile));
 
-		it = s_tlbJitPages.insert_or_assign(
-			page_key,
-			std::move(page)).first;
+	        it = s_tlbJitPages.insert_or_assign(
+	            page_key,
+	            std::move(page)).first;
+	    }
+
+	    page_ptr = it->second.get();
+
+	    fast.key = page_key;
+	    fast.physical_page = ppage;
+	    fast.page = page_ptr;
 	}
 
 	if (vpc >= 0xC0000000u)
@@ -1652,7 +1676,7 @@ static uptr psbbnGetTlbJitTarget()
 		}
 	}
 
-	TlbJitPage& page = *it->second;
+	TlbJitPage& page = *page_ptr;
 	const u32 slot = (vpc & 0xFFFu) >> 2;
 
 	return page.blocks[slot].GetFnptr();
@@ -1736,8 +1760,8 @@ static void psbbnRecompileTlbBlock()
 	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xFF;
 
 	const u64 page_key =
-		(static_cast<u64>(asid) << 32) |
-		static_cast<u64>(vpage);
+        (static_cast<u64>(asid) << 32) |
+        static_cast<u64>(vpage);
 
 	auto it = s_tlbJitPages.find(page_key);
 	if (it == s_tlbJitPages.end())
@@ -2581,6 +2605,7 @@ static void recResetRaw()
 	recBlocks.Reset();
 
 	s_tlbJitPages.clear();
+	s_tlbJitFastCache = {};
 
 	vtlb_ClearLoadStoreInfo();
 
