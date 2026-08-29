@@ -102,7 +102,6 @@ struct TlbJitPage
 {
 	u32 virtual_page = 0;
 	u32 physical_page = 0;
-	u8 asid = 0;
 
 	std::array<BASEBLOCK, 0x400> blocks{};
 	std::array<BASEBLOCKEX, 0x400> block_ex{};
@@ -1614,11 +1613,14 @@ static uptr psbbnGetTlbJitTarget()
 	}
 
 	const u32 vpage = vpc & ~0xFFFu;
-	const u32 ppage = paddr & ~0xFFFu;
-	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xFF;
-	const u64 page_key =
-	    (static_cast<u64>(asid) << 32) |
-	    static_cast<u64>(vpage);
+	    const u32 ppage = paddr & ~0xFFFu;
+
+	    // Sparse compiled code is reusable when both the guest virtual
+	    // page and its resolved physical backing are identical.
+	    // The current ASID/TLB mapping was already validated above.
+    const u64 page_key =
+        (static_cast<u64>(vpage) << 32) |
+        static_cast<u64>(ppage);
 
 	TlbJitFastEntry& fast =
 	    s_tlbJitFastCache[tlbJitFastIndex(page_key)];
@@ -1636,15 +1638,13 @@ static uptr psbbnGetTlbJitTarget()
 	    auto it = s_tlbJitPages.find(page_key);
 
 	    if (it == s_tlbJitPages.end() ||
-	        it->second->virtual_page != vpage ||
-	        it->second->physical_page != ppage ||
-	        it->second->asid != asid)
-	    {
-	        auto page = std::make_unique<TlbJitPage>();
+            it->second->virtual_page != vpage ||
+            it->second->physical_page != ppage)
+        {
+            auto page = std::make_unique<TlbJitPage>();
 
-	        page->virtual_page = vpage;
-	        page->physical_page = ppage;
-	        page->asid = static_cast<u8>(asid);
+            page->virtual_page = vpage;
+            page->physical_page = ppage;
 
 	        for (BASEBLOCK& block : page->blocks)
 	            block.SetFnptr(reinterpret_cast<uptr>(TlbJITCompile));
@@ -1757,23 +1757,21 @@ static void psbbnRecompileTlbBlock()
 	const u32 vpage = startpc & ~0xFFFu;
 	const u32 ppage = paddr & ~0xFFFu;
 	const u32 page_end = vpage + 0x1000u;
-	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xFF;
-
+	
 	const u64 page_key =
-        (static_cast<u64>(asid) << 32) |
-        static_cast<u64>(vpage);
-
+	    (static_cast<u64>(vpage) << 32) |
+	    static_cast<u64>(ppage);
+	
 	auto it = s_tlbJitPages.find(page_key);
 	if (it == s_tlbJitPages.end())
-		return;
-
+	    return;
+	
 	TlbJitPage& page = *it->second;
-
+	
 	if (page.virtual_page != vpage ||
-		page.physical_page != ppage ||
-		page.asid != asid)
+	    page.physical_page != ppage)
 	{
-		return;
+	    return;
 	}
 
 	const u32 slot = (startpc & 0xFFFu) >> 2;
