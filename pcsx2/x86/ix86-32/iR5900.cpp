@@ -1567,18 +1567,6 @@ static uptr psbbnGetTlbJitTarget()
 	if (vpc == 0x80065B78u) // do_execve
 		psbbnProbeExec();
 
-	static u64 tlbDispatchCount = 0;
-	const u64 dispatchId = ++tlbDispatchCount;
-	
-	if (false && ((dispatchId % 1000000) == 0))
-	{
-		Console.Error(
-			"PSBBN TLBJITDISPATCH[%llu] pc=%08X ASID=%02X",
-			dispatchId,
-			vpc,
-			cpuRegs.CP0.n.EntryHi & 0xFF);
-	}
-
 	// KSEG0/KSEG1 are direct-mapped and continue using the normal recLUT.
 	//
 	// KUSEG (00000000-7FFFFFFF) and KSEG2/KSEG3
@@ -1659,21 +1647,6 @@ static uptr psbbnGetTlbJitTarget()
 	    fast.key = page_key;
 	    fast.physical_page = ppage;
 	    fast.page = page_ptr;
-	}
-
-	if (vpc >= 0xC0000000u)
-	{
-		static u64 highTlbDispatchCount = 0;
-		const u64 id = ++highTlbDispatchCount;
-
-		if (false && (id <= 100 || (id % 100000) == 0))
-		{
-			Console.Error(
-				"PSBBN TLBJITHIGH[%llu] pc=%08X ASID=%02X",
-				id,
-				vpc,
-				cpuRegs.CP0.n.EntryHi & 0xFF);
-		}
 	}
 
 	TlbJitPage& page = *page_ptr;
