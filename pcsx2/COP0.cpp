@@ -238,6 +238,9 @@ static bool s_psbbnAsidRemap = false;
 
 static bool tlbSlotIsInstalled(const tlbs& t)
 {
+	if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+		return true;
+
 	return t.isGlobal() || (t.EntryHi.ASID == tlbInstalledASID);
 }
 
@@ -706,6 +709,13 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 
 			case 10:
 			{
+				if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+				{
+					// Preserve stock PCSX2 behavior outside PS2 Linux mode.
+					cpuRegs.CP0.r[_Rd_] = cpuRegs.GPR.r[_Rt_].UL[0];
+					break;
+				}
+
 				// EntryHi carries the ASID, so writing it can switch address
 				// space. Tear the old one out before building the new one:
 				// they overlap, so interleaving would leave the unmaps
