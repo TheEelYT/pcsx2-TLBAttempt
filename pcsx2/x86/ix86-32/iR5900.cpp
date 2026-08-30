@@ -3396,9 +3396,10 @@ static void iBranchTest(u32 newpc)
 		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
 
 		if (newpc == 0xffffffff ||
-		    newpc == 0x80065B78u ||
-		    newpc < 0x80000000u ||
-		    newpc >= 0xC0000000u)
+		    (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+		        (newpc == 0x80065B78u ||
+		         newpc < 0x80000000u ||
+		         newpc >= 0xC0000000u)))
 		{
 		    xJS(DispatcherReg);
 		}
