@@ -855,22 +855,25 @@ static const void* _DynGen_DispatcherReg()
 {
     u8* retval = xGetPtr();
 
-    xFastCall((const void*)psbbnGetTlbJitTarget);
+    if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+    {
+        xFastCall((const void*)psbbnGetTlbJitTarget);
 
-	xTEST(rax, rax);
-	xForwardJZ32 normal_dispatch;
+        xTEST(rax, rax);
+        xForwardJZ32 normal_dispatch;
 
-	xJMP(rax);
+        xJMP(rax);
 
-	normal_dispatch.SetTarget();
+        normal_dispatch.SetTarget();
+    }
 
-	xMOV(eax, ptr[&cpuRegs.pc]);
-	xMOV(edx, eax);
-	xSHR(eax, 16);
-	xMOV(rcx, ptrNative[xComplexAddress(rcx, recLUT, rax * wordsize)]);
-	xJMP(ptrNative[rdx * (wordsize / 4) + rcx]);
+    xMOV(eax, ptr[&cpuRegs.pc]);
+    xMOV(edx, eax);
+    xSHR(eax, 16);
+    xMOV(rcx, ptrNative[xComplexAddress(rcx, recLUT, rax * wordsize)]);
+    xJMP(ptrNative[rdx * (wordsize / 4) + rcx]);
 
-	return retval;
+    return retval;
 }
 
 static const void* _DynGen_DispatcherEvent()
