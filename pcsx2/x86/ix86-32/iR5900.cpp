@@ -1556,6 +1556,9 @@ static void psbbnProbeExecReturn()
 
 static uptr psbbnGetTlbJitTarget()
 {
+	if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+		return 0;
+
 	const u32 vpc = cpuRegs.pc;
 
 	if (vpc == 0x8001EB58u) // return from do_execve() to sys_execve
