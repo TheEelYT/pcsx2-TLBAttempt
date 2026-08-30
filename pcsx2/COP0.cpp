@@ -342,17 +342,24 @@ void MapTLB(const tlbs& t, int i)
 			for (addr = saddr; addr < eaddr; addr++)
 			{
 				if ((addr & mask) == ((t.VPN2() >> 12) & mask))
-				{ //match
+				{ 	//match
 					// D clear means the guest wants a store here to trap.
-					if (t.EntryLo0.D)
-						memSetPageAddr(addr << 12, t.PFN0() + ((addr - saddr) << 12));
-					else
-						memSetPageAddrReadOnly(addr << 12);
+					const u32 vaddr = addr << 12;
+					const u32 paddr = t.PFN0() + ((addr - saddr) << 12);
+
+					memSetPageAddr(vaddr, paddr);
+
+					if (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+						!t.EntryLo0.D)
+					{
+						memSetPageAddrReadOnly(vaddr);
+					}
+
 					if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
-					        !s_psbbnAsidRemap)
-					    {
-					        Cpu->Clear(addr << 12, 0x400);
-					    }
+				        !s_psbbnAsidRemap)
+				    {
+				        Cpu->Clear(addr << 12, 0x400);
+				    }
 				}
 			}
 		}
@@ -368,15 +375,22 @@ void MapTLB(const tlbs& t, int i)
 				if ((addr & mask) == ((t.VPN2() >> 12) & mask))
 				{ //match
 					// D clear means the guest wants a store here to trap.
-					if (t.EntryLo1.D)
-						memSetPageAddr(addr << 12, t.PFN1() + ((addr - saddr) << 12));
-					else
-						memSetPageAddrReadOnly(addr << 12);
+					const u32 vaddr = addr << 12;
+					const u32 paddr = t.PFN1() + ((addr - saddr) << 12);
+					
+					memSetPageAddr(vaddr, paddr);
+					
+					if (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+						!t.EntryLo1.D)
+					{
+						memSetPageAddrReadOnly(vaddr);
+					}
+
 					if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
-					        !s_psbbnAsidRemap)
-					    {
-					        Cpu->Clear(addr << 12, 0x400);
-					    }
+				        !s_psbbnAsidRemap)
+				    {
+				        Cpu->Clear(addr << 12, 0x400);
+				    }
 				}
 			}
 		}

@@ -1087,6 +1087,38 @@ __fi u32 vtlb_V2P(u32 vaddr)
 	return paddr;
 }
 
+bool vtlb_PS2LinuxResolveMapped(u32 vaddr, u32* paddr)
+{
+	if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux ||
+		!vtlbdata.ppmap ||
+		vaddr >= 0x80000000u)
+	{
+		return false;
+	}
+
+	const VTLBVirtual vmv =
+		vtlbdata.vmap[vaddr >> VTLB_PAGE_BITS];
+
+	// Normal RAM/ROM mappings are direct pointers. The only handler
+	// we can also resolve from ppmap is our D=0 write-protected page.
+	if (vmv.isHandler(vaddr) &&
+		vmv.assumeHandlerGetID() != WriteProtectedVirtHandler)
+	{
+		return false;
+	}
+
+	const u32 resolved =
+		vtlbdata.ppmap[vaddr >> VTLB_PAGE_BITS] |
+		(vaddr & VTLB_PAGE_MASK);
+
+	// Don't trust ppmap for special mappings such as scratchpad.
+	if (resolved >= VTLB_PMAP_SZ)
+		return false;
+
+	*paddr = resolved;
+	return true;
+}
+
 static constexpr bool vtlb_MismatchedHostPageSize()
 {
 	return (__pagesize != VTLB_PAGE_SIZE);
@@ -1577,8 +1609,11 @@ void vtlb_Init()
 	vtlb_VMapUnmap((VTLB_VMAP_ITEMS - 1) * VTLB_PAGE_SIZE, VTLB_PAGE_SIZE);
 
 	// The LUT is only used for 1 game so we allocate it only when the gamefix is enabled (save 4MB)
-	if (EmuConfig.Gamefixes.GoemonTlbHack)
+	if (EmuConfig.Gamefixes.GoemonTlbHack ||
+		EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+	{
 		vtlb_Alloc_Ppmap();
+	}
 }
 
 // vtlb_Reset -- Performs a COP0-level reset of the PS2's TLB.

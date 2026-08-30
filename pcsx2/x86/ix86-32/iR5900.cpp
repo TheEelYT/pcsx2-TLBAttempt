@@ -1577,14 +1577,23 @@ static uptr psbbnGetTlbJitTarget()
 	
 	bool valid = false;
 	u32 paddr = 0;
-	const bool matched = psbbnLookupTlb(vpc, &valid, &paddr);
 
-	// No matching/valid mapping: this is an instruction-fetch TLBL.
-	if (!matched || !valid)
+	if (vpc < 0x80000000u &&
+		vtlb_PS2LinuxResolveMapped(vpc, &paddr))
 	{
-		cpuRegs.pc = vpc + 4;
-		cpuTlbMissR(vpc, 0);
-		recExitExecution();
+		valid = true;
+	}
+	else
+	{
+		const bool matched =
+			psbbnLookupTlb(vpc, &valid, &paddr);
+
+		if (!matched || !valid)
+		{
+			cpuRegs.pc = vpc + 4;
+			cpuTlbMissR(vpc, 0);
+			recExitExecution();
+		}
 	}
 
 	// Identity mapping already works through the normal recLUT.

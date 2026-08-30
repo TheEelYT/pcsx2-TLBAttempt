@@ -70,6 +70,8 @@ extern void* vtlb_GetPhyPtr(u32 paddr);
 extern u32  vtlb_V2P(u32 vaddr);
 extern void vtlb_DynV2P();
 
+extern bool vtlb_PS2LinuxResolveMapped(u32 vaddr, u32* paddr);
+
 //virtual mappings
 extern void vtlb_VMap(u32 vaddr,u32 paddr,u32 sz);
 extern void vtlb_VMapBuffer(u32 vaddr,void* buffer,u32 sz);
