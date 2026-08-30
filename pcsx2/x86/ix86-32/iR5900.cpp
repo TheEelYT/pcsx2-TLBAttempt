@@ -3323,57 +3323,61 @@ static void iBranchTest(u32 newpc)
 	}*/
 
 	// Temporary PSBBN/Linux process-lifecycle probes.
-	if (newpc == 0x80030720u) // do_exit
+	if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
 	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbeDoExit);
-	}
-	else if (newpc == 0x80037490u) // force_sig
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbeForceSig);
-	}
-	else if (newpc == 0x80036F08u) // force_sig_info
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbeForceSigInfo);
-	}
-
-	if (newpc == 0x80026480u) // schedule()
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbeRc4Schedule);
-		xFastCall((void*)psbbnProbeRcBnSchedule);
-	}
-
-	if (newpc == 0x80066170u) // pipe_wait()
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbeRcBnPipeWait);
-	}
+		// Temporary PSBBN/Linux process-lifecycle probes.
+		if (newpc == 0x80030720u) // do_exit
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbeDoExit);
+		}
+		else if (newpc == 0x80037490u) // force_sig
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbeForceSig);
+		}
+		else if (newpc == 0x80036F08u) // force_sig_info
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbeForceSigInfo);
+		}
 	
-	if (newpc == 0x80026A90u) // __wake_up()
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbePipeWake);
-	}
+		if (newpc == 0x80026480u) // schedule()
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbeRc4Schedule);
+			xFastCall((void*)psbbnProbeRcBnSchedule);
+		}
 	
-	if (newpc == 0x80026CC0u) // __wake_up_sync()
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbePipeWakeSync);
-	}
-
-	if (newpc == 0x800665F0u) // pipe_write()
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbePipeWrite);
-	}
+		if (newpc == 0x80066170u) // pipe_wait()
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbeRcBnPipeWait);
+		}
 	
-	if (newpc == 0x80066AF0u) // pipe_release()
-	{
-		iFlushCall(FLUSH_EVERYTHING);
-		xFastCall((void*)psbbnProbePipeRelease);
+		if (newpc == 0x80026A90u) // __wake_up()
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbePipeWake);
+		}
+	
+		if (newpc == 0x80026CC0u) // __wake_up_sync()
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbePipeWakeSync);
+		}
+	
+		if (newpc == 0x800665F0u) // pipe_write()
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbePipeWrite);
+		}
+	
+		if (newpc == 0x80066AF0u) // pipe_release()
+		{
+			iFlushCall(FLUSH_EVERYTHING);
+			xFastCall((void*)psbbnProbePipeRelease);
+		}
 	}
 	
 	// Check the Event scheduler if our "cycle target" has been reached.
