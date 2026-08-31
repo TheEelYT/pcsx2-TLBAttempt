@@ -16,6 +16,10 @@ extern const char* const bios[256];
 
 bool IsPS2LinuxActive();
 void DisablePS2LinuxRuntime();
+
+bool IsPS2LinuxActive();
+void DisablePS2LinuxRuntime();
+void ResetPS2LinuxRuntime();
 }
 
 extern s32 EEsCycle;

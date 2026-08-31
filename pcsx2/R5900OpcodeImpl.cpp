@@ -32,6 +32,11 @@ void R5900::DisablePS2LinuxRuntime()
 	s_ps2LinuxRuntimeDisabled = true;
 }
 
+void R5900::ResetPS2LinuxRuntime()
+{
+	s_ps2LinuxRuntimeDisabled = false;
+}
+
 static __fi bool _add64_Overflow( s64 x, s64 y, s64 &ret )
 {
 	const s64 result = x + y;
