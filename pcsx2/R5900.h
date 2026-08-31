@@ -10,8 +10,12 @@
 // --------------------------------------------------------------------------------------
 //  EE Bios function name tables.
 // --------------------------------------------------------------------------------------
-namespace R5900 {
+namespace R5900
+{
 extern const char* const bios[256];
+
+bool IsPS2LinuxActive();
+void DisablePS2LinuxRuntime();
 }
 
 extern s32 EEsCycle;

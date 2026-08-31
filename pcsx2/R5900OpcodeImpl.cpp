@@ -19,6 +19,19 @@
 GS_VideoMode gsVideoMode = GS_VideoMode::Uninitialized;
 bool gsIsInterlaced = false;
 
+static bool s_ps2LinuxRuntimeDisabled = false;
+
+bool R5900::IsPS2LinuxActive()
+{
+	return EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+		!s_ps2LinuxRuntimeDisabled;
+}
+
+void R5900::DisablePS2LinuxRuntime()
+{
+	s_ps2LinuxRuntimeDisabled = true;
+}
+
 static __fi bool _add64_Overflow( s64 x, s64 y, s64 &ret )
 {
 	const s64 result = x + y;
@@ -943,6 +956,23 @@ void SYSCALL()
 		call = cpuRegs.GPR.n.v1.UC[0];
 
 	BIOS_LOG("Bios call: %s (%x)", R5900::bios[call], call);
+	
+	if (!linuxSyscall && (call == 6 || call == 7))
+	{
+		Console.Error(
+			"PS2LINUX REAL BIOS syscall=%u name=%s pc=%08X "
+			"v0=%08X v1=%08X "
+			"a0=%08X a1=%08X a2=%08X a3=%08X",
+			call,
+			R5900::bios[call],
+			cpuRegs.pc,
+			cpuRegs.GPR.n.v0.UL[0],
+			cpuRegs.GPR.n.v1.UL[0],
+			cpuRegs.GPR.n.a0.UL[0],
+			cpuRegs.GPR.n.a1.UL[0],
+			cpuRegs.GPR.n.a2.UL[0],
+			cpuRegs.GPR.n.a3.UL[0]);
+	}
 
 	if (linuxSyscall)
 	{
@@ -954,6 +984,13 @@ void SYSCALL()
 		return;
 	}
 
+	if (R5900::IsPS2LinuxActive() &&
+		call == static_cast<u8>(Syscall::ExecPS2) &&
+		cpuRegs.pc == 0x000C10B8)
+	{
+		Console.Warning("PS2Linux: native PS2 handoff detected, disabling Linux runtime");
+		R5900::DisablePS2LinuxRuntime();
+	}
 
 	switch (static_cast<Syscall>(call))
 	{

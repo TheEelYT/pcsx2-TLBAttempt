@@ -2611,6 +2611,12 @@ static void recResetRaw()
 {
 	Console.WriteLn(Color_StrongBlack, "EE/iR5900 Recompiler Reset");
 
+	Console.Warning(
+		"PS2Linux RESETSTATE enabled=%u exposedRam=%u extraRam=%u",
+		EmuConfig.Cpu.Recompiler.EnablePS2Linux ? 1u : 0u,
+		Ps2MemSize::ExposedRam,
+		extraRam ? 1u : 0u);
+
 	if (CHECK_EXTRAMEM != extraRam)
 	{
 		recReserveRAM();
@@ -3905,7 +3911,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		//If the COP0 DIE bit is disabled, cycles should be doubled.
 		s_nBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 	
-		if (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+		if (R5900::IsPS2LinuxActive() &&
 			tlbJitShouldInterpretMemory(cpuRegs.code))
 		{
 			// Match the old interpreter-backed load path: a GPR load
