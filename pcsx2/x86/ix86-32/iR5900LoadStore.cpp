@@ -23,7 +23,7 @@ namespace R5900::Dynarec::OpcodeImpl
 // keep the EE recompiler for normal instructions, but execute memory
 // instructions through the interpreter fallback so guest TLB exceptions
 // are raised with fully-flushed CPU state.
-#undef LOADSTORE_RECOMPILE
+//#undef LOADSTORE_RECOMPILE
 /*********************************************************
 * Load and store for GPR                                 *
 * Format:  OP rt, offset(base)                           *

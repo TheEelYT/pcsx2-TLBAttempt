@@ -610,6 +610,56 @@ static u32 psbbnShouldInterpretKuseg()
 	return 1;
 }
 
+static bool tlbJitShouldInterpretMemory(u32 code)
+{
+	const u32 op = code >> 26;
+
+	switch (op)
+	{
+		case 26: // LDL
+		case 27: // LDR
+		case 30: // LQ
+		case 31: // SQ
+
+		case 32: // LB
+		case 33: // LH
+		case 34: // LWL
+		case 35: // LW
+		case 36: // LBU
+		case 37: // LHU
+		case 38: // LWR
+		case 39: // LWU
+		case 40: // SB
+		case 41: // SH
+		case 42: // SWL
+		case 43: // SW
+		case 44: // SDL
+		case 45: // SDR
+		case 46: // SWR
+
+		case 49: // LWC1
+		case 55: // LD
+		case 57: // SWC1
+		case 63: // SD
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+static bool tlbJitInterpreterMemoryWritesGpr(u32 code)
+{
+	const u32 op = code >> 26;
+
+	return
+		op == 26 || // LDL
+		op == 27 || // LDR
+		op == 30 || // LQ
+		(op >= 32 && op <= 39) || // LB..LWU
+		op == 55; // LD
+}
+
 static bool tlbJitCanCompileOne(u32 code)
 {
 	const u32 op = code >> 26;
@@ -3854,7 +3904,22 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		//If the COP0 DIE bit is disabled, cycles should be doubled.
 		s_nBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-		opcode.recompile();
+	
+		if (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
+			tlbJitShouldInterpretMemory(cpuRegs.code))
+		{
+			// Match the old interpreter-backed load path: a GPR load
+			// invalidates any recompiler-cached value for Rt before the
+			// interpreter writes the architectural register.
+			if (tlbJitInterpreterMemoryWritesGpr(cpuRegs.code) && _Rt_)
+				_deleteEEreg(_Rt_, 1);
+	
+			recCall(opcode.interpret);
+		}
+		else
+		{
+			opcode.recompile();
+		}
 	}
 
 	if (!swapped_delay_slot)
