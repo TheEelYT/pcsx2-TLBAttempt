@@ -1609,7 +1609,7 @@ static void psbbnProbeExecReturn()
 
 static uptr psbbnGetTlbJitTarget()
 {
-	if (!EmuConfig.Cpu.Recompiler.EnablePS2Linux)
+	if (!R5900::IsPS2LinuxActive())
 		return 0;
 
 	const u32 vpc = cpuRegs.pc;
