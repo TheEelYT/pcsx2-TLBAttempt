@@ -2126,11 +2126,13 @@ static void psbbnRecompileTlbBlock()
 		    instruction_count++;
 
 		    if (op == 35 || // LW
-	            op == 43)   // SW
-	        {
-	            continue;
-	        }
-
+		        op == 43 || // SW
+		        op == 49 || // LWC1
+		        op == 57)   // SWC1
+		    {
+		        continue;
+		    }
+		    
 		    break;
 		}		
 
