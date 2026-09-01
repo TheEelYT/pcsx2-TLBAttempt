@@ -157,6 +157,7 @@ static __fi u32 tlbJitDispatchFastIndex(u32 vpc)
 static bool s_tlbJitCompiling = false;
 static u32 s_tlbJitCompileVPage = 0;
 static u32 s_tlbJitCompilePPage = 0;
+static TlbJitPage* s_tlbJitCompilePage = nullptr;
 
 static __fi int* tlbJitCodePtr(u32 vaddr)
 {
@@ -2310,6 +2311,13 @@ static void psbbnRecompileTlbBlock()
 	s_tlbJitCompiling = true;
 	s_tlbJitCompileVPage = vpage;
 	s_tlbJitCompilePPage = ppage;
+	s_tlbJitCompilePage = &page;
+	
+	while (!g_branch && pc < s_nEndBlock)
+		recompileNextInstruction(false, false);
+	
+	s_tlbJitCompiling = false;
+	s_tlbJitCompilePage = nullptr;
 
 	while (!g_branch && pc < s_nEndBlock)
 		recompileNextInstruction(false, false);
@@ -3645,19 +3653,55 @@ static void iBranchTest(u32 newpc)
 		xADD(rax, scaleblockcycles());
 		xMOV(ptr64[&cpuRegs.cycle], rax); // update cycles
 		xSUB(rax, ptr64[&cpuRegs.nextEventCycle]);
-
-		if (newpc == 0xffffffff ||
-		    (EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
-		        (newpc == 0x80065B78u ||
-		         newpc < 0x80000000u ||
-		         newpc >= 0xC0000000u)))
+		
+		const bool psbbn_same_page_link =
+			s_tlbJitCompiling &&
+			s_tlbJitCompilePage != nullptr &&
+			s_tlbJitCompileVPage < 0x80000000u &&
+			newpc != 0xffffffffu &&
+			newpc < 0x80000000u &&
+			(newpc & ~0xFFFu) == s_tlbJitCompileVPage;
+		
+		if (psbbn_same_page_link)
 		{
-		    xJS(DispatcherReg);
+			// If an event is due, preserve the normal DispatcherEvent path.
+			// Only direct-link while we're safely between events.
+			xForwardJNS32 event_due;
+		
+			BASEBLOCK& target_block =
+				s_tlbJitCompilePage->blocks[
+					(newpc & 0xFFFu) >> 2];
+		
+			// Required if this slot still points at TlbJITCompile.
+			xMOV(ptr32[&cpuRegs.pc], newpc);
+		
+			// Jump through the live BASEBLOCK function pointer rather than
+			// baking the current host target into this source block.
+			xLoadFarAddr(
+				r10,
+				reinterpret_cast<void*>(
+					&target_block.m_pFnptr));
+		
+			xJMP(ptrNative[r10]);
+		
+			event_due.SetTarget();
+		}
+		else if (
+			newpc == 0xffffffffu ||
+			(R5900::IsPS2LinuxActive() &&
+				(newpc == 0x80065B78u ||
+				 newpc < 0x80000000u ||
+				 newpc >= 0xC0000000u)))
+		{
+			xJS(DispatcherReg);
 		}
 		else
 		{
-		    recBlocks.Link(HWADDR(newpc), xJcc32(Jcc_Signed));
+			recBlocks.Link(
+				HWADDR(newpc),
+				xJcc32(Jcc_Signed));
 		}
+		
 		xJMP((void*)DispatcherEvent);
 	}
 }
