@@ -21,6 +21,16 @@ bool gsIsInterlaced = false;
 
 static bool s_ps2LinuxRuntimeDisabled = false;
 
+u32 R5900::g_ps2LinuxRuntimeGeneration = 1;
+
+static void bumpPS2LinuxRuntimeGeneration()
+{
+	++R5900::g_ps2LinuxRuntimeGeneration;
+
+	if (R5900::g_ps2LinuxRuntimeGeneration == 0)
+		R5900::g_ps2LinuxRuntimeGeneration = 1;
+}
+
 bool R5900::IsPS2LinuxActive()
 {
 	return EmuConfig.Cpu.Recompiler.EnablePS2Linux &&
@@ -29,12 +39,20 @@ bool R5900::IsPS2LinuxActive()
 
 void R5900::DisablePS2LinuxRuntime()
 {
-	s_ps2LinuxRuntimeDisabled = true;
+	if (!s_ps2LinuxRuntimeDisabled)
+	{
+		s_ps2LinuxRuntimeDisabled = true;
+		bumpPS2LinuxRuntimeGeneration();
+	}
 }
 
 void R5900::ResetPS2LinuxRuntime()
 {
-	s_ps2LinuxRuntimeDisabled = false;
+	if (s_ps2LinuxRuntimeDisabled)
+	{
+		s_ps2LinuxRuntimeDisabled = false;
+		bumpPS2LinuxRuntimeGeneration();
+	}
 }
 
 static __fi bool _add64_Overflow( s64 x, s64 y, s64 &ret )

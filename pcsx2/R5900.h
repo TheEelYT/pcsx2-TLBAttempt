@@ -14,8 +14,7 @@ namespace R5900
 {
 extern const char* const bios[256];
 
-bool IsPS2LinuxActive();
-void DisablePS2LinuxRuntime();
+extern u32 g_ps2LinuxRuntimeGeneration;
 
 bool IsPS2LinuxActive();
 void DisablePS2LinuxRuntime();

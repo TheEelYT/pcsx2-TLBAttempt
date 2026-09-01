@@ -10,6 +10,7 @@
 #include "Memory.h"
 #include "Patch.h"
 #include "R3000A.h"
+#include "R5900.h"
 #include "R5900OpcodeTables.h"
 #include "VMManager.h"
 #include "vtlb.h"
@@ -26,6 +27,7 @@
 #include "common/emitter/internal.h"
 
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <unordered_map>
 #include <cstdio>
@@ -122,6 +124,34 @@ static __fi u32 tlbJitFastIndex(u64 key)
 {
     return static_cast<u32>(
         (key ^ (key >> 20) ^ (key >> 40)) & 255u);
+}
+
+static constexpr u32 TLB_JIT_DISPATCH_CACHE_SIZE = 1024;
+
+struct alignas(32) TlbJitDispatchFastEntry
+{
+	u32 vpc = 0;
+	u32 ppage = 0;
+	u32 runtime_generation = 0;
+	u32 padding = 0;
+
+	uptr vmap_raw = 0;
+	BASEBLOCK* block = nullptr;
+};
+
+static_assert(sizeof(TlbJitDispatchFastEntry) == 32);
+
+static std::array<
+	TlbJitDispatchFastEntry,
+	TLB_JIT_DISPATCH_CACHE_SIZE>
+	s_tlbJitDispatchFastCache;
+
+static __fi u32 tlbJitDispatchFastIndex(u32 vpc)
+{
+	return ((vpc >> 2) ^
+			(vpc >> 12) ^
+			(vpc >> 22)) &
+		(TLB_JIT_DISPATCH_CACHE_SIZE - 1);
 }
 
 static bool s_tlbJitCompiling = false;
@@ -903,27 +933,163 @@ static bool tlbJitCanCompileDelaySlot(u32 code)
 // called when jumping to variable pc address
 static const void* _DynGen_DispatcherReg()
 {
-    u8* retval = xGetPtr();
+	u8* retval = xGetPtr();
 
-    if (EmuConfig.Cpu.Recompiler.EnablePS2Linux)
-    {
-        xFastCall((const void*)psbbnGetTlbJitTarget);
+	// Try the exact-PC cache for KUSEG before entering C++.
+	xMOV(eax, ptr32[&cpuRegs.pc]);
 
-        xTEST(rax, rax);
-        xForwardJZ32 normal_dispatch;
+	xCMP(eax, 0x80000000u);
+	xForwardJAE32 non_kuseg;
 
-        xJMP(rax);
+	// index = ((vpc >> 2) ^ (vpc >> 12) ^ (vpc >> 22)) & 1023
+	xMOV(edx, eax);
+	xSHR(edx, 2);
 
-        normal_dispatch.SetTarget();
-    }
+	xMOV(ecx, eax);
+	xSHR(ecx, 12);
+	xXOR(edx, ecx);
 
-    xMOV(eax, ptr[&cpuRegs.pc]);
-    xMOV(edx, eax);
-    xSHR(eax, 16);
-    xMOV(rcx, ptrNative[xComplexAddress(rcx, recLUT, rax * wordsize)]);
-    xJMP(ptrNative[rdx * (wordsize / 4) + rcx]);
+	xMOV(ecx, eax);
+	xSHR(ecx, 22);
+	xXOR(edx, ecx);
 
-    return retval;
+	xAND(edx, TLB_JIT_DISPATCH_CACHE_SIZE - 1);
+
+	// sizeof(TlbJitDispatchFastEntry) == 32.
+	xSHL(edx, 5);
+
+	xLoadFarAddr(
+		r11,
+		s_tlbJitDispatchFastCache.data());
+
+	xADD(r11, rdx);
+
+	// Exact virtual PC must match.
+	xCMP(
+		eax,
+		ptr32[
+			r11 +
+			offsetof(
+				TlbJitDispatchFastEntry,
+				vpc)]);
+
+	xForwardJNE32 cache_vpc_miss;
+
+	// Entry must belong to the current Linux runtime epoch.
+	xMOV(
+		ecx,
+		ptr32[
+			&R5900::g_ps2LinuxRuntimeGeneration]);
+
+	xCMP(
+		ecx,
+		ptr32[
+			r11 +
+			offsetof(
+				TlbJitDispatchFastEntry,
+				runtime_generation)]);
+
+	xForwardJNE32 cache_generation_miss;
+
+	// A null block marks an unused/invalid entry.
+	xMOV(
+		r10,
+		ptrNative[
+			r11 +
+			offsetof(
+				TlbJitDispatchFastEntry,
+				block)]);
+
+	xTEST(r10, r10);
+	xForwardJZ32 cache_block_miss;
+
+	// Get the current VTLB 4K-page index.
+	xMOV(r8d, eax);
+	xSHR(r8d, vtlb_private::VTLB_PAGE_BITS);
+
+	// Validate the complete VTLB virtual mapping token.
+	xMOV(
+		rcx,
+		ptrNative[
+			&vtlb_private::vtlbdata.vmap]);
+
+	xMOV(
+		r9,
+		ptrNative[
+			r8 * wordsize + rcx]);
+
+	xCMP(
+		r9,
+		ptrNative[
+			r11 +
+			offsetof(
+				TlbJitDispatchFastEntry,
+				vmap_raw)]);
+
+	xForwardJNE32 cache_vmap_miss;
+
+	// ppmap is also required, particularly for D=0/write-protected
+	// mappings where vmap alone doesn't identify physical backing.
+	xMOV(
+		rcx,
+		ptrNative[
+			&vtlb_private::vtlbdata.ppmap]);
+
+	xTEST(rcx, rcx);
+	xForwardJZ32 cache_ppmap_miss;
+
+	xMOV(
+		r9d,
+		ptr32[
+			r8 * 4 + rcx]);
+
+	xAND(r9d, ~vtlb_private::VTLB_PAGE_MASK);
+
+	xCMP(
+		r9d,
+		ptr32[
+			r11 +
+			offsetof(
+				TlbJitDispatchFastEntry,
+				ppage)]);
+
+	xForwardJNE32 cache_ppage_miss;
+
+	// The BASEBLOCK slot itself stays authoritative. Its m_pFnptr is
+	// updated when a cold slot gets compiled.
+	xJMP(ptrNative[r10]);
+
+	non_kuseg.SetTarget();
+	cache_vpc_miss.SetTarget();
+	cache_generation_miss.SetTarget();
+	cache_block_miss.SetTarget();
+	cache_vmap_miss.SetTarget();
+	cache_ppmap_miss.SetTarget();
+	cache_ppage_miss.SetTarget();
+
+	// Miss: use the existing fully validated C++ path.
+	xFastCall((const void*)psbbnGetTlbJitTarget);
+
+	xTEST(rax, rax);
+	xForwardJZ32 normal_dispatch;
+
+	xJMP(rax);
+
+	normal_dispatch.SetTarget();
+
+	xMOV(eax, ptr[&cpuRegs.pc]);
+	xMOV(edx, eax);
+	xSHR(eax, 16);
+	xMOV(
+		rcx,
+		ptrNative[
+			xComplexAddress(
+				rcx,
+				recLUT,
+				rax * wordsize)]);
+	xJMP(ptrNative[rdx * (wordsize / 4) + rcx]);
+
+	return retval;
 }
 
 static const void* _DynGen_DispatcherEvent()
@@ -1716,7 +1882,28 @@ static uptr psbbnGetTlbJitTarget()
 
 	TlbJitPage& page = *page_ptr;
 	const u32 slot = (vpc & 0xFFFu) >> 2;
-
+	
+	if (vpc < 0x80000000u)
+	{
+		TlbJitDispatchFastEntry& dispatch =
+			s_tlbJitDispatchFastCache[
+				tlbJitDispatchFastIndex(vpc)];
+	
+		// Publish block last. A null block means the entry isn't usable.
+		dispatch.block = nullptr;
+	
+		dispatch.vpc = vpc;
+		dispatch.ppage = ppage;
+		dispatch.runtime_generation =
+			R5900::g_ps2LinuxRuntimeGeneration;
+		dispatch.vmap_raw =
+			vtlb_private::vtlbdata
+				.vmap[vpc >> vtlb_private::VTLB_PAGE_BITS]
+				.raw();
+	
+		dispatch.block = &page.blocks[slot];
+	}
+	
 	return page.blocks[slot].GetFnptr();
 }
 
@@ -2648,6 +2835,7 @@ static void recResetRaw()
 
 	s_tlbJitPages.clear();
 	s_tlbJitFastCache = {};
+	s_tlbJitDispatchFastCache = {};
 
 	vtlb_ClearLoadStoreInfo();
 
