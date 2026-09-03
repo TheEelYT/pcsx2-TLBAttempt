@@ -1828,7 +1828,7 @@ static uptr psbbnGetTlbJitTarget()
 	if ((vpc & 0xFFFu) == 0xFFCu)
 	{
 		intCpu.Step();
-		recExitExecution();
+		return reinterpret_cast<uptr>(DispatcherReg);
 	}
 
 	const u32 vpage = vpc & ~0xFFFu;
