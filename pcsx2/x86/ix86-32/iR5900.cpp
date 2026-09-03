@@ -615,7 +615,6 @@ static const void* _DynGen_TlbJITCompile()
 static void psbbnTlbJitFallback()
 {
 	intCpu.Step();
-	recExitExecution();
 }
 
 static bool psbbnLookupTlb(u32 vaddr, bool* validOut, u32* paddrOut);
