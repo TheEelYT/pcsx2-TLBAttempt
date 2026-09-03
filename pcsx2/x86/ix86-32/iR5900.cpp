@@ -1814,7 +1814,7 @@ static uptr psbbnGetTlbJitTarget()
 		{
 			cpuRegs.pc = vpc + 4;
 			cpuTlbMissR(vpc, 0);
-			recExitExecution();
+			return 0;
 		}
 	}
 
