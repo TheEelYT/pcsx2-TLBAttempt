@@ -54,6 +54,11 @@ static bool eeCpuExecuting = false;
 static bool eeRecExitRequested = false;
 static bool g_resetEeScalingStats = false;
 
+// Temporary A/B: a guest exception which cancels an interpreter-backed
+// instruction can resume through the EE dispatcher without returning
+// all the way to the host loop.
+static bool s_psbbnResumeAfterCancel = false;
+
 #define PC_GETBLOCK(x) PC_GETBLOCK_(x, recLUT)
 
 u32 maxrecmem = 0;
@@ -2921,32 +2926,43 @@ static void recResetEE()
 
 static void recCancelInstruction() //Supposedly this should never be called
 {
-	recExitExecution();
+    if (R5900::IsPS2LinuxActive() && eeCpuExecuting)
+        s_psbbnResumeAfterCancel = true;
+
+    recExitExecution();
 }
 
 static void recExecute()
 {
-	// Reset before we try to execute any code, if there's one pending.
-	// We need to do this here, because if we reset while we're executing, it sets the "needs reset"
-	// flag, which triggers a JIT exit (the fastjmp_set below), and eventually loops back here.
-	if (eeRecNeedsReset)
+	for (;;)
 	{
-		eeRecNeedsReset = false;
-		recResetRaw();
+		// Reset before we try to execute any code, if there's one pending.
+		// We need to do this here, because if we reset while we're executing, it sets the "needs reset"
+		// flag, which triggers a JIT exit (the fastjmp_set below), and eventually loops back here.
+		if (eeRecNeedsReset)
+		{
+			eeRecNeedsReset = false;
+			recResetRaw();
+		}
+
+		// setjmp will save the register context and will return 0
+		// A call to longjmp will restore the context (included the eip/rip)
+		// but will return the longjmp 2nd parameter (here 1)
+		if (!fastjmp_set(&m_SetJmp_StateCheck))
+		{
+			eeCpuExecuting = true;
+			((void (*)())EnterRecompiledCode)();
+
+			// Generally unreachable code here ...
+		}
+
+		eeCpuExecuting = false;
+
+		if (!s_psbbnResumeAfterCancel)
+			break;
+
+		s_psbbnResumeAfterCancel = false;
 	}
-
-	// setjmp will save the register context and will return 0
-	// A call to longjmp will restore the context (included the eip/rip)
-	// but will return the longjmp 2nd parameter (here 1)
-	if (!fastjmp_set(&m_SetJmp_StateCheck))
-	{
-		eeCpuExecuting = true;
-		((void (*)())EnterRecompiledCode)();
-
-		// Generally unreachable code here ...
-	}
-
-	eeCpuExecuting = false;
 
 	EE::Profiler.Print();
 }
